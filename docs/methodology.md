@@ -19,6 +19,7 @@ Both sides also get the same compiler options. Extended template diagnostics are
 | S5 | Engine comparison | none | the S2 candidate with the native, wasm and sidecar engines forced in turn | 4 |
 | S6 | Rebuild after one edit | `ngc` incremental (`NgtscProgram` with `oldProgram`) | `HybridCompiler` with `updateFileContent`, then `analyzeOptimizedDelta` | 5 |
 | S7 | Development bundle | `ng build --configuration development` | ngp's `serve` pipeline: `ngp`, then `esbuild` bundle | indicative only |
+| R | Reference: a normal `ng build`, development and production | none | none | context for S1 and S2 |
 
 S1 and S2 are implemented in [harness/run.mjs](../harness/run.mjs). The baseline, [harness/ngc-transform.mjs](../harness/ngc-transform.mjs), drives `NgtscProgram` the way the Angular CLI's AOT compilation does: it loads and analyzes the program, then emits JavaScript with Angular's transformers. It never requests diagnostics, so ngc generates no type-check blocks and TypeScript skips its semantic check. The candidate, [harness/esbuild-transform.mjs](../harness/esbuild-transform.mjs), turns ngp's `.ts` output into one `.js` per file with the workspace's tsconfig and skips the `.ngtypecheck.ts` files.
 
@@ -26,6 +27,14 @@ Two asymmetries remain, and both cost ngp time:
 
 - `ngp --optimize` always generates type-check blocks, and ngp has no option to skip them. In S2, ngp does work the baseline doesn't.
 - The candidate runs as two processes, ngp then esbuild, so it pays Node startup twice. A CLI integration would run both in one process.
+
+S1 and S2 time only the compiler step. A real `ng build` also type-checks, bundles, processes stylesheets and, in production, optimizes. R puts the compiler step in context. It times a cold `ng build` of the same apps, development and production, with the CLI cache (`.angular/`) cleared before each run, and reads the CLI's own phase timings (`NG_BUILD_DEBUG_PERF=1`). The report splits each build into:
+
+- Angular compilation: program creation, analysis, finding affected files and TypeScript emit, which is the work ngp replaces;
+- type-check: the CLI's diagnostics phase, which moves to a separate TypeScript run with ngp;
+- optimization: production chunk optimization, which nothing in this repo changes.
+
+R has no ngp column, because ngp can't run inside the CLI yet. The CLI bundles while it compiles, so its phases overlap, and the report shows each as a share of the whole build rather than as slices that sum to 100%.
 
 S4 depends on `tsgo` accepting ngp's TCB output. The first run checks that, and if it fails, S4 reports the error instead of a time.
 
@@ -99,6 +108,7 @@ A run only produces a timing if it passes these checks. Otherwise the harness re
 2. **It runs.** For S7, the development bundle boots in headless Chrome without console errors.
 3. **Diagnostics match.** S3 and S4 report the same set of error codes and locations as ngc. Any difference is listed in the report, since the Angular team expects a few rare new type errors. Plain `tsc` reports a template error at its line in the `.ngtypecheck.ts` file, while ngc reports it in the `.html` or inline template. The harness has to map TCB locations back to the template through the span comments ngp writes into the TCB, such as `/*270,277*/`, before it can compare locations.
 4. **Bundles match.** With `--optimize`, bundle size stays within 1% of ngc's.
+5. **The input is unchanged.** Before and after timing, the app's files match the SHA-256 in its manifest. `ngp --out` overwrites sources when its input path runs through a symlink, so the harness checks rather than assumes.
 
 A compiler that fails gate 1 on an app tells you more about ngp's readiness than any timing would, so the report shows failures next to the timings.
 
@@ -114,7 +124,9 @@ Every result file records:
 
 The native engine sizes its thread pool from `available_parallelism()` and has no override. To test scaling by core count on Linux, run under `taskset`. macOS has no equivalent, so core-scaling results come from Linux only.
 
-GitHub-hosted runners are noisy. CI runs keep the harness working and catch correctness regressions, and published timings come from a named, dedicated machine.
+Every Node process, on both sides, runs with the same heap limit, `--max-old-space-size=6144`. On an 8 GB runner, Node's default heap is about 2 GB, and ngc's full compile with template type-checking of the 5,000-component app runs out of memory at that limit (exit 134; it peaks at 2.7 GB with the larger heap). The report states the limit.
+
+Published results come from GitHub Actions ([.github/workflows/bench.yml](../.github/workflows/bench.yml)), not from a laptop, so anyone with access can see how a number was produced and rerun it. Standard runners have 2 cores and change CPU model between runs, so a report compares ratios inside one run and records the CPU, the runner image and the load average. The generated apps and all compiler output live on a RAM disk (`/dev/shm`). On the runner's network disk, ngp waited on I/O for over a second of a 7-second run, and its medians varied by more than 5%.
 
 ## Layout
 

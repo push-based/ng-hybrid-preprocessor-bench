@@ -14,8 +14,8 @@ on:
         description: Corpus sizes, comma-separated (100, 1000, 5000)
         default: '100'
       scenarios:
-        description: Scenarios, comma-separated (S1, S2)
-        default: S1,S2
+        description: Scenarios, comma-separated (S1, S2, R = ng build reference)
+        default: S1,S2,R
       engine:
         description: ngp analyzer engine (native, wasm, sidecar)
         default: native
@@ -117,7 +117,7 @@ jobs:
       CORPUS_DIR: /dev/shm/corpus
       BENCH_OUT_DIR: /dev/shm/bench-out
       SIZES: ${{ inputs.sizes || '100' }}
-      SCENARIOS: ${{ inputs.scenarios || 'S1,S2' }}
+      SCENARIOS: ${{ inputs.scenarios || 'S1,S2,R' }}
       ENGINE: ${{ inputs.engine || 'native' }}
       RUNS: ${{ inputs.runs || '5' }}
       WARMUP: ${{ inputs.warmup || '1' }}

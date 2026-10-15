@@ -37,7 +37,8 @@ out(
     `compiler-cli ${env.versions.compilerCli}, TypeScript ${env.versions.typescript}, ` +
     `esbuild ${env.versions.esbuild}, ${env.versions.hyperfine}. ` +
     `ngp engine: ${run.engine}. ${run.warmup} warm-up and ${run.runs} measured runs per command; ` +
-    `${run.phaseRuns} phase run${run.phaseRuns === 1 ? '' : 's'}.`,
+    `${run.phaseRuns} phase run${run.phaseRuns === 1 ? '' : 's'}. ` +
+    `Every Node process gets a ${run.heapMb ?? 'default'} MB heap limit.`,
 );
 if (env.ci) {
   out();
@@ -54,6 +55,10 @@ if (env.warnings.length) {
 for (const scenarioId of run.scenarios) {
   const rows = results.filter((r) => r.scenario === scenarioId);
   if (rows.length === 0) continue;
+  if (rows[0].reference) {
+    renderReference(scenarioId, rows);
+    continue;
+  }
   out();
   out(`## ${scenarioId}: ${rows[0].title}`);
   out();
@@ -120,6 +125,59 @@ for (const scenarioId of run.scenarios) {
       `| ${num(r.corpus.components)} | ${ngcPhases.map((k) => msf(p(k))).join(' | ')} | ${msf(wall - named)} | ${msf(wall)} |`,
     );
   }
+}
+
+function renderReference(scenarioId, rows) {
+  const pct = (part, whole) => `${Math.round((100 * part) / whole)}%`;
+  out();
+  out(`## ${scenarioId}: Full \`ng build\` (reference, not a comparison)`);
+  out();
+  out(
+    'ngp isn\'t part of the Angular CLI yet, so `ng build` can\'t use it, and this section has no ngp column. ' +
+      'It times a normal Angular CLI build of the same apps, cold, with the CLI cache cleared before every run. ' +
+      'It answers one question: how much of a real build is the compiler step that S1 and S2 measure?',
+  );
+  out();
+  out('The breakdown comes from the CLI\'s own timings (`NG_BUILD_DEBUG_PERF=1`):');
+  out();
+  out('- **Angular compilation**: creating the TypeScript program, analyzing Angular decorators, finding affected files and emitting TypeScript. This is the work ngp replaces, and what S1 and S2 time.');
+  out('- **Type-check**: template and TypeScript diagnostics. With ngp, this moves to a separate TypeScript run over ngp\'s type-check blocks (S3 and S4).');
+  out('- **Optimization**: minifying and tree-shaking chunks, production only. ngp doesn\'t change it, and neither does anything else in this report.');
+  out();
+  out('The CLI bundles while it compiles, so the phases overlap. Each percentage is that phase\'s time relative to the whole build; they don\'t add up to 100%.');
+  out();
+  out('| Components | `ng build` development | Angular compilation | Type-check | `ng build` production | Optimization | Peak memory, dev / prod |');
+  out('|---:|---:|---:|---:|---:|---:|---:|');
+  const compileKeys = ['NG_CREATE_PROGRAM', 'NG_ANALYZE_PROGRAM', 'NG_FIND_AFFECTED', 'NG_EMIT_TS'];
+  for (const r of rows) {
+    const label = num(r.corpus.components);
+    if (!r.hyperfine) {
+      const failed = Object.entries(r.gate)
+        .filter(([, g]) => !g.pass)
+        .map(([c, g]) => `${c} build failed (exit ${g.exit})`);
+      out(`| ${label} | ${failed.join('; ')} | | | | | |`);
+      continue;
+    }
+    const dev = r.phaseRuns.development;
+    const prod = r.phaseRuns.production;
+    const devWall = med(dev, (x) => x.wallMs);
+    const prodWall = med(prod, (x) => x.wallMs);
+    const compile = med(dev, (x) => compileKeys.reduce((sum, k) => sum + (x.phasesMs[k] ?? 0), 0));
+    const typecheck = med(dev, (x) => x.phasesMs['NG_DIAGNOSTICS_TOTAL'] ?? 0);
+    const optimize = med(prod, (x) => x.phasesMs['OPTIMIZE_CHUNKS'] ?? 0);
+    const noisy = (x) => (x.noisy ? ' ⚠' : '');
+    out(
+      `| ${label} | ${sec(r.hyperfine.development.medianMs)}${noisy(r.hyperfine.development)} | ` +
+        `${sec(compile)} (${pct(compile, devWall)}) | ${sec(typecheck)} (${pct(typecheck, devWall)}) | ` +
+        `${sec(r.hyperfine.production.medianMs)}${noisy(r.hyperfine.production)} | ${sec(optimize)} (${pct(optimize, prodWall)}) | ` +
+        `${mb(med(dev, (x) => x.rss))} / ${mb(med(prod, (x) => x.rss))} |`,
+    );
+  }
+  out();
+  out(
+    'Build times are hyperfine medians. Phase times and percentages come from the separate instrumented runs, ' +
+      'so each percentage compares numbers from the same runs.',
+  );
 }
 
 out();

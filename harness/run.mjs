@@ -2,6 +2,9 @@
 //
 //   S1  local mode   baseline: ngc-transform --mode local       candidate: ngp, then esbuild
 //   S2  optimize     baseline: ngc-transform --mode full        candidate: ngp --optimize, then esbuild
+//   R   reference    a normal `ng build` (development and production), with the CLI's own phase
+//                    timings. Not a comparison: ngp can't run inside the CLI yet. It shows how much
+//                    of a real build is the compiler step that S1 and S2 measure.
 //
 // For every scenario and corpus size it does three things, in this order:
 //   1. Correctness gate (untimed). Baseline emits one .js per source .ts with zero diagnostics;
@@ -11,8 +14,12 @@
 //   3. Phase runs under /usr/bin/time: ngc's tracePerformance phases, ngp's NGP_PHASE_TIMINGS
 //      phases, the esbuild step on its own, and peak RSS of every process.
 //
-// Usage: node harness/run.mjs [--scenario S1,S2] [--size 100,1000,5000] [--engine native]
-//          [--runs 10] [--warmup 2] [--phase-runs 3] [--seed 1]
+// Usage: node harness/run.mjs [--scenario S1,S2,R] [--size 100,1000,5000] [--engine native]
+//          [--runs 10] [--warmup 2] [--phase-runs 3] [--seed 1] [--heap-mb 6144]
+//
+// Every Node process, on both sides, gets the same --max-old-space-size (default 6144 MB). On an
+// 8 GB runner Node's default heap is about 2 GB, and ngc's full type-check of the 5,000-component
+// app runs out of memory there.
 // Writes results/runs/<run-id>/ and then the report (harness/report.mjs).
 //
 // Generated apps are read from CORPUS_DIR (default: corpus/generated).
@@ -20,6 +27,7 @@
 // IDEs and Spotlight react to thousands of new files there and add noise to the timings.
 
 import {execFileSync, spawnSync} from 'node:child_process';
+import {readFileSync, rmSync} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -31,19 +39,21 @@ import {summarize} from './lib/stats.mjs';
 
 const {values: args} = parseArgs({
   options: {
-    scenario: {type: 'string', default: 'S1,S2'},
+    scenario: {type: 'string', default: 'S1,S2,R'},
     size: {type: 'string', default: '100,1000,5000'},
     engine: {type: 'string', default: 'native'},
     runs: {type: 'string', default: '10'},
     warmup: {type: 'string', default: '2'},
     'phase-runs': {type: 'string', default: '3'},
     seed: {type: 'string', default: '1'},
+    'heap-mb': {type: 'string', default: '6144'},
   },
 });
 
 const SCENARIOS = {
   S1: {title: 'Transform only, local mode', ngcMode: 'local', ngpArgs: []},
   S2: {title: 'Transform with cross-file optimization', ngcMode: 'full', ngpArgs: ['--optimize']},
+  R: {title: 'Full ng build (reference, not a comparison)', reference: true},
 };
 const scenarios = args.scenario.split(',').map((s) => s.trim());
 for (const s of scenarios) if (!SCENARIOS[s]) throw new Error(`unknown scenario ${s}`);
@@ -62,6 +72,11 @@ await fs.mkdir(benchOutRequested, {recursive: true});
 const benchOut = await fs.realpath(benchOutRequested);
 const warmup = Number(args.warmup);
 const phaseRuns = Number(args['phase-runs']);
+const heapMb = Number(args['heap-mb']);
+// Inherited by every child process: ngc, ngp, esbuild, ng build, and hyperfine's commands.
+process.env['NODE_OPTIONS'] = [process.env['NODE_OPTIONS'], `--max-old-space-size=${heapMb}`]
+  .filter(Boolean)
+  .join(' ');
 
 const env = await captureEnvironment();
 const runId = `${env.date.replace(/[:.]/g, '-').slice(0, 19)}-${env.hostTag}`;
@@ -69,7 +84,7 @@ const runDir = path.join(root, 'results/runs', runId);
 await fs.mkdir(path.join(runDir, 'hyperfine'), {recursive: true});
 await fs.writeFile(
   path.join(runDir, 'run.json'),
-  JSON.stringify({runId, scenarios, sizes, engine, runs, warmup, phaseRuns, environment: env}, null, 2) + '\n',
+  JSON.stringify({runId, scenarios, sizes, engine, runs, warmup, phaseRuns, heapMb, environment: env}, null, 2) + '\n',
 );
 console.log(`run ${runId}: ${scenarios.join(', ')} x ${sizes.join(', ')}, engine ${engine}, ${runs} runs`);
 if (env.warnings.length) console.log(env.warnings.map((w) => `  warning: ${w}`).join('\n'));
@@ -83,28 +98,118 @@ async function countFiles(dir, pred) {
   return entries.filter((e) => e.isFile() && pred(e.name)).length;
 }
 
-/** Runs a node script under /usr/bin/time; returns wall ms, peak RSS bytes and output. */
-function timed(scriptArgs, extraEnv = {}) {
+/**
+ * Runs a node script under /usr/bin/time; returns wall ms, peak RSS bytes and the script's output.
+ * time's own statistics go to a separate file so they never bury the script's error messages.
+ */
+let timedCounter = 0;
+function timed(scriptArgs, extraEnv = {}, cwd = root) {
   const timeFlag = process.platform === 'darwin' ? '-l' : '-v';
+  const statsFile = path.join(benchOut, `time-${process.pid}-${timedCounter++}.txt`);
   const start = process.hrtime.bigint();
-  const res = spawnSync('/usr/bin/time', [timeFlag, node, ...scriptArgs], {
-    cwd: root,
+  const res = spawnSync('/usr/bin/time', [timeFlag, '-o', statsFile, node, ...scriptArgs], {
+    cwd,
     env: {...process.env, ...extraEnv},
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
   });
   const ms = Number(process.hrtime.bigint() - start) / 1e6;
-  const stderr = res.stderr ?? '';
+  let stats = '';
+  try {
+    stats = readFileSync(statsFile, 'utf8');
+    rmSync(statsFile);
+  } catch {}
   const rss =
     process.platform === 'darwin'
-      ? Number(stderr.match(/(\d+)\s+maximum resident set size/)?.[1] ?? NaN)
-      : Number(stderr.match(/Maximum resident set size \(kbytes\): (\d+)/)?.[1] ?? NaN) * 1024;
-  return {exit: res.status, ms, rss, output: (res.stdout ?? '') + stderr};
+      ? Number(stats.match(/(\d+)\s+maximum resident set size/)?.[1] ?? NaN)
+      : Number(stats.match(/Maximum resident set size \(kbytes\): (\d+)/)?.[1] ?? NaN) * 1024;
+  return {exit: res.status, ms, rss, output: (res.stdout ?? '') + (res.stderr ?? '')};
+}
+
+/** The R scenario: cold `ng build` in development and production, with the CLI's phase timings. */
+async function runReference(scenarioId, scenario, size) {
+  const name = `standalone-${size}-s${args.seed}`;
+  const workspace = path.join(corpusDir, name);
+  const manifest = JSON.parse(await fs.readFile(path.join(workspace, 'manifest.json'), 'utf8'));
+  const out = path.join(benchOut, `${scenarioId}-${size}`);
+  const ngBin = path.join(root, 'node_modules/@angular/cli/bin/ng.js');
+  const configs = ['development', 'production'];
+  const buildArgs = (config) => [
+    ngBin, 'build', '--configuration', config, '--output-path', path.join(out, config), '--no-progress',
+  ];
+  const ngEnv = {NG_CLI_ANALYTICS: 'false'};
+  // .angular/cache is the CLI's persistent build cache; clearing it makes every build cold.
+  const cacheDir = path.join(workspace, '.angular');
+  const wipe = async () => {
+    await fs.rm(out, {recursive: true, force: true});
+    await fs.rm(cacheDir, {recursive: true, force: true});
+  };
+  const result = {
+    scenario: scenarioId,
+    title: scenario.title,
+    reference: true,
+    corpus: {name, components: manifest.components, sha256: manifest.sha256},
+    gate: {},
+  };
+  console.log(`\n== ${scenarioId} ${name}`);
+
+  await wipe();
+  result.corpusIntactBefore = await verifyCorpus(workspace, manifest);
+  if (!result.corpusIntactBefore) throw new Error(`${name} does not match its manifest; regenerate it`);
+  for (const config of configs) {
+    const g = timed(buildArgs(config), ngEnv, workspace);
+    const js = await countFiles(path.join(out, config), (n) => n.endsWith('.js'));
+    result.gate[config] = {exit: g.exit, js, pass: g.exit === 0 && js > 0};
+    if (!result.gate[config].pass) result.gate[config].tail = g.output.trim().split('\n').slice(-8);
+  }
+  const gatePass = configs.every((c) => result.gate[c].pass);
+  console.log(
+    `gate: ${configs.map((c) => `${c} ${result.gate[c].pass ? 'pass' : 'FAIL'} (${result.gate[c].js} js)`).join(', ')}`,
+  );
+
+  if (gatePass) {
+    const hfJson = path.join(runDir, 'hyperfine', `${scenarioId}-${size}.json`);
+    const hfArgs = ['--warmup', String(warmup), '--runs', String(runs), '--style', 'basic', '--export-json', hfJson];
+    for (const config of configs) {
+      hfArgs.push(
+        '--prepare', `rm -rf ${q(path.join(out, config))} ${q(cacheDir)}`,
+        '--command-name', `ng build ${config}`,
+        `cd ${q(workspace)} && ${[node, ...buildArgs(config)].map(q).join(' ')}`,
+      );
+    }
+    execFileSync(hyperfineBin, hfArgs, {cwd: root, env: {...process.env, ...ngEnv}, stdio: 'inherit'});
+    const hf = JSON.parse(await fs.readFile(hfJson, 'utf8'));
+    result.hyperfine = {development: summarize(hf.results[0]), production: summarize(hf.results[1])};
+
+    // NG_BUILD_DEBUG_PERF=1 makes the CLI print DURATION[<phase>]: <seconds> lines.
+    // Phases marked * add up concurrent requests and can exceed wall time.
+    result.phaseRuns = {development: [], production: []};
+    for (let i = 0; i < phaseRuns; i++) {
+      for (const config of configs) {
+        await wipe();
+        const t = timed(buildArgs(config), {...ngEnv, NG_BUILD_DEBUG_PERF: '1'}, workspace);
+        const phasesMs = {};
+        for (const m of t.output.matchAll(/DURATION\[([A-Z_]+\*?)\]: ([\d.]+)s/g)) {
+          phasesMs[m[1]] = Number(m[2]) * 1000;
+        }
+        result.phaseRuns[config].push({wallMs: t.ms, rss: t.rss, phasesMs});
+      }
+    }
+  }
+
+  await wipe();
+  result.corpusIntactAfter = await verifyCorpus(workspace, manifest);
+  await fs.writeFile(path.join(runDir, `${scenarioId}-${size}.json`), JSON.stringify(result, null, 2) + '\n');
+  if (!result.corpusIntactAfter) throw new Error(`${name} changed during the benchmark; results are invalid`);
 }
 
 for (const scenarioId of scenarios) {
   const scenario = SCENARIOS[scenarioId];
   for (const size of sizes) {
+    if (scenario.reference) {
+      await runReference(scenarioId, scenario, size);
+      continue;
+    }
     const name = `standalone-${size}-s${args.seed}`;
     const workspace = path.join(corpusDir, name);
     const manifest = JSON.parse(await fs.readFile(path.join(workspace, 'manifest.json'), 'utf8'));
