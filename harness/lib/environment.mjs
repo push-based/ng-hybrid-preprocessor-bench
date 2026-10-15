@@ -97,7 +97,8 @@ export async function captureEnvironment() {
     env.warnings.push(`Angular checkout is ${env.versions.angularSha}, versions.env pins ${pinned.ANGULAR_SHA}`);
   }
   if (power === 'battery') env.warnings.push('running on battery power; timings may be throttled');
-  if (env.machine.loadAverage1m > cores * 0.25) {
+  // Half the cores busy before the run starts means something else is competing for CPU.
+  if (env.machine.loadAverage1m > Math.max(1, cores * 0.5)) {
     env.warnings.push(`1-minute load average is ${env.machine.loadAverage1m.toFixed(1)} on ${cores} cores`);
   }
   return env;

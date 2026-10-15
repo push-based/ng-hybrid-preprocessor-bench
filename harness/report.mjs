@@ -37,7 +37,7 @@ out(
     `compiler-cli ${env.versions.compilerCli}, TypeScript ${env.versions.typescript}, ` +
     `esbuild ${env.versions.esbuild}, ${env.versions.hyperfine}. ` +
     `ngp engine: ${run.engine}. ${run.warmup} warm-up and ${run.runs} measured runs per command; ` +
-    `${run.phaseRuns} phase runs.`,
+    `${run.phaseRuns} phase run${run.phaseRuns === 1 ? '' : 's'}.`,
 );
 if (env.ci) {
   out();
@@ -93,7 +93,7 @@ for (const scenarioId of run.scenarios) {
   if (timedRows.length === 0) continue;
 
   out();
-  out(`### Where ngp's time goes (${scenarioId}, median ms of ${run.phaseRuns} runs)`);
+  out(`### Where ngp's time goes (${scenarioId}, median ms of ${run.phaseRuns} run${run.phaseRuns === 1 ? '' : 's'})`);
   out();
   out('| Components | Node start + load | Setup | Waiting on analyzer | prepareChunk | Process files | Diagnostics writes | esbuild | Total |');
   out('|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
@@ -107,7 +107,7 @@ for (const scenarioId of run.scenarios) {
   }
 
   out();
-  out(`### Where ngc's time goes (${scenarioId}, median ms of ${run.phaseRuns} runs, from \`tracePerformance\`)`);
+  out(`### Where ngc's time goes (${scenarioId}, median ms of ${run.phaseRuns} run${run.phaseRuns === 1 ? '' : 's'}, from \`tracePerformance\`)`);
   out();
   const ngcPhases = ['TypeScriptProgramCreate', 'Analysis', 'Resolve', 'Compile', 'TypeScriptEmit'];
   out(`| Components | Program create | Analysis | Resolve | Compile | TS emit | Other | Total |`);
