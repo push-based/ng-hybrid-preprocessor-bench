@@ -2,7 +2,7 @@
 
 Angular has a second compiler on `main`, and the Angular team hasn't published a single number for it. This repo measures ngp, the new Rust-and-TypeScript preprocessor, against ngc, the compiler you use today, on builds that do the same amount of work.
 
-> **Status: the transform-only scenarios (S1, S2) run in CI.** Type-checking, engine and rebuild scenarios are next. [Results so far](#results-so-far).
+> **Status: the compiler-step scenarios (S1, S2) and a full `ng build` reference (R) run in CI.** Type-checking, engine and rebuild scenarios are next. [Results so far](#results-so-far).
 
 ## What ngp is
 
@@ -116,32 +116,50 @@ They time the **Angular compiler step**, not a full `ng build`. ngp isn't wired 
 - **ngp side**: ngp, then esbuild to turn its TypeScript output into JavaScript.
 - **Not included on either side**: type-checking, bundling, stylesheets, minification, `index.html` and assets.
 
-So "1.5× faster" means the compiler step is 1.5× faster. How much that shortens a real build depends on how much of the build that step is, which is what the `ng build` reference (R) measures. R is in every CI run from now on; [TK: R results from the next full run].
+So "1.5× faster" means the compiler step is 1.5× faster. How much that shortens a real build depends on how much of the build that step is, which is what the `ng build` reference below measures.
 
-### Compiler step
+All numbers below come from [run 38729829978](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38729829978): GitHub's standard runner (2 cores, AMD EPYC 7763, 8 GB), Angular `92e5aa8`, native engine, 2 warm-up and 10 measured runs, a 6 GB heap limit for every Node process, apps and output on a RAM disk. Times are medians. Run-to-run variation (median absolute deviation) stayed at or below 2% everywhere, and every app was unchanged after its scenario. GitHub assigns a different CPU model to each run, so compare ratios, not seconds, across runs.
 
-From [run 38725798376](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38725798376): GitHub's standard runner (2 cores, AMD EPYC 9V45, 8 GB), Angular `92e5aa8`, native engine, 2 warm-up and 10 measured runs, compiler output on a RAM disk. Times are medians.
+### Compiler step: ngc vs ngp
 
 | Scenario | Components | ngc | ngp + esbuild | ngc ÷ ngp | Peak memory, ngc → ngp |
 |---|---:|---:|---:|---:|---:|
-| S1, transform only | 100 | 2.31 s | 0.94 s | 2.45× | 435 → 228 MB |
-| S1, transform only | 1,000 | 7.64 s | 4.80 s | 1.59× | 701 → 405 MB |
-| S1, transform only | 5,000 | 26.3 s | 17.9 s | 1.48× | 1,660 → 929 MB |
-| S2, with cross-file optimization | 100 | 2.44 s | 1.04 s | 2.34× | 452 → 243 MB |
-| S2, with cross-file optimization | 1,000 | 7.85 s | 4.96 s | 1.58× | 721 → 477 MB |
-| S2, with cross-file optimization | 5,000 | no result | | | |
+| S1, transform only | 100 | 3.65 s | 1.49 s | 2.45× | 412 → 226 MB |
+| S1, transform only | 1,000 | 11.8 s | 6.78 s | 1.74× | 700 → 415 MB |
+| S1, transform only | 5,000 | 39.9 s | 28.6 s | 1.39× | 1,832 → 930 MB |
+| S2, with cross-file optimization | 100 | 3.68 s | 1.53 s | 2.40× | 430 → 241 MB |
+| S2, with cross-file optimization | 1,000 | 12.2 s | 7.39 s | 1.65× | 722 → 477 MB |
+| S2, with cross-file optimization | 5,000 | 42.6 s | 32.4 s | 1.31× | 2,116 → 1,273 MB |
 
-S2 at 5,000 components has no result because ngc ran out of memory during the untimed correctness check, which includes its full template type-check. Node's default heap on this 8 GB runner is about 2 GB, and the check needs 2.7 GB. Every Node process now gets the same 6 GB limit, on both sides, and the next full run fills this row.
+ngp's lead shrinks as the app grows, which is the opposite of what [hypothesis 1](docs/research.md#what-should-get-faster) predicted. Its phase timings say where the time goes. At 5,000 components in S2, ngp's TypeScript backend spends 14.5 s generating code and 3.8 s in `prepareChunk`, while it waits on the Rust analyzer for 2.8 s. esbuild adds 8.9 s. That backend is Angular's existing template compiler, and its cost grows with the number of files. ngc's fixed costs, like building the TypeScript program, get spread over more files as the app grows. This runner has 2 cores, so the native analyzer, which uses every core, has little room to show its parallelism.
 
-Run-to-run variation stayed at or below 2.1% for every result, and each app was unchanged after its scenario. GitHub assigns a different CPU model to each run, so compare ratios, not seconds, across runs.
+### A full `ng build`, for context
 
-ngp's lead shrinks as the app grows, which is the opposite of what [hypothesis 1](docs/research.md#what-should-get-faster) predicted. Its phase timings say where the time goes. At 5,000 components, ngp's TypeScript backend spends 8.4 s generating code and 2.3 s in `prepareChunk`, while it waits on the Rust analyzer for 1.2 s. esbuild adds another 5.7 s. That backend is Angular's existing template compiler, and its cost grows with the number of files. ngc's fixed costs, like building the TypeScript program, get spread over more files as the app grows. This runner has 2 cores, so the native analyzer, which uses every core, has little room to show its parallelism.
+This table has no ngp column, because ngp can't run inside the CLI yet. It times a normal, cold `ng build` of the same apps and splits it using the CLI's own phase timings (`NG_BUILD_DEBUG_PERF=1`):
+
+- **Angular compilation** is creating the TypeScript program, analyzing Angular decorators, finding affected files and emitting TypeScript. It's the work ngp replaces, and what the table above times.
+- **Type-check** is template and TypeScript diagnostics. With ngp, it moves to a separate TypeScript run over ngp's type-check blocks, which is where TypeScript 7 (`tsgo`) comes in. The S3 and S4 scenarios will measure it.
+- **Optimization** is minification and tree-shaking in production builds. ngp doesn't change it.
+
+The CLI bundles while it compiles, so the phases overlap. Each percentage is that phase's time relative to the whole development or production build, and the percentages don't add up to 100%.
+
+| Components | `ng build` development | Angular compilation | Type-check | `ng build` production | Optimization | Peak memory, dev / prod |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 5.91 s | 3.08 s (52%) | 1.70 s (28%) | 6.70 s | 0.13 s (2%) | 641 / 678 MB |
+| 1,000 | 20.7 s | 11.5 s (56%) | 7.49 s (36%) | 21.7 s | 0.60 s (3%) | 1,119 / 1,173 MB |
+| 5,000 | 78.1 s | 45.3 s (60%) | 28.7 s (38%) | 84.4 s | 5.48 s (7%) | 3,249 / 3,633 MB |
+
+What the two tables say together:
+
+- Angular compilation is the biggest single part of a build, 52–60% of a development build here. The compiler step is worth speeding up.
+- Type-checking is the second biggest, 28–38%, and it grows with app size. The compiler-step tables above don't include it, and it's where the TypeScript 7 payoff is supposed to land.
+- A rough estimate, not a measurement: if the CLI's compilation phases sped up by the S2 ratio, the 5,000-component development build would shrink by about 11 seconds, roughly 14%. That assumes the CLI would see the same speedup as this standalone comparison, and that nothing else in the build changes.
 
 ## Findings beyond speed
 
 - **`ngp --out` can overwrite your sources.** If the path you give ngp runs through a symlink, such as macOS's `/var` → `/private/var`, the analyzer reports real paths and ngp computes output paths against the symlinked root. The `..` segments resolve back onto the input files, which ngp then overwrites. The harness resolves real paths and checks each app against its hash before and after timing.
 - **Template errors point at the type-check block.** ngc reports a template type error at its place in the template, such as `f0-c01.html:9:41`. ngp plus `tsc` reports it at line 34 of `f0-c01.ngtypecheck.ts`, because `tsc` doesn't map type-check blocks back to templates.
-- **ngc's full type-check of a large app doesn't fit Node's default heap on GitHub's standard runner.** On the 5,000-component app it aborts with "JavaScript heap out of memory" at a 2 GB heap and peaks at 2.7 GB with more room. This affects ngc, not ngp, but it's what a team with an app this size would hit in CI.
+- **ngc's full type-check of a large app doesn't fit Node's default heap on GitHub's standard runner.** On the 5,000-component app it aborts with "JavaScript heap out of memory" at a 2 GB heap and peaks at 2.7 GB with more room. `ng build` of the same app peaks at 3.2–3.6 GB. This affects ngc, not ngp, but it's what a team with an app this size would hit in CI.
 - **ngp rewrites `.ngdiag.json` after every chunk.** The analyzer streams one file per chunk, so on the 1,000-component app ngp writes that file 1,089 times. That's 160 ms on a RAM disk and 370 ms on the runner's disk.
 
 ## Requirements
