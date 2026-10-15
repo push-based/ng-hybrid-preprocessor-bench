@@ -1,0 +1,52 @@
+diff --git a/packages/compiler-cli/preprocessor/test/utils.ts b/packages/compiler-cli/preprocessor/test/utils.ts
+index 6db1dcc..1f446b0 100644
+--- a/packages/compiler-cli/preprocessor/test/utils.ts
++++ b/packages/compiler-cli/preprocessor/test/utils.ts
+@@ -83,6 +83,9 @@ export function resolveWasmBinding(): string {
+ }
+ 
+ export function resolveSidecarBinary(): string {
++  if (process.env['NGP_SIDECAR_BINARY']) {
++    return process.env['NGP_SIDECAR_BINARY'];
++  }
+   const ext = process.platform === 'win32' ? '.exe' : '';
+   const runfilesDir = process.env['JS_BINARY__RUNFILES'] || process.env['RUNFILES_DIR'];
+   if (runfilesDir) {
+@@ -209,6 +212,10 @@ function hasBuiltAngularCore(nodeModules: string): boolean {
+ let fixtureNodeModules: string | null = null;
+ export function resolveFixtureNodeModules(): string {
+   if (fixtureNodeModules) return fixtureNodeModules;
++  if (process.env['NGP_FIXTURE_NODE_MODULES']) {
++    fixtureNodeModules = process.env['NGP_FIXTURE_NODE_MODULES'];
++    return fixtureNodeModules;
++  }
+ 
+   const synthetic = getOrCreateSyntheticNodeModules();
+   if (synthetic) {
+@@ -426,7 +433,8 @@ export async function runPipeline(
+   }
+ 
+   let analyzer;
+-  if (options.sidecar) {
++  const engine = options.sidecar ? 'sidecar' : (process.env['NGP_ENGINE'] ?? 'wasm');
++  if (engine === 'sidecar') {
+     const {SidecarAnalyzer} = await import('../api.js');
+     const sidecar = new SidecarAnalyzer(resolveSidecarBinary());
+     await sidecar.initialize(tsconfigFile.path, options.optimize, virtualFiles, nodeModulesPath, {
+@@ -434,6 +442,16 @@ export async function runPipeline(
+       rootDirs,
+     });
+     analyzer = sidecar;
++  } else if (engine === 'native') {
++    analyzer = await createAnalyzer(tsconfigFile.path, {
++      backend: 'native',
++      nativeBinding: process.env['NGP_NATIVE_BINDING'],
++      virtualFiles,
++      optimize: options.optimize,
++      nodeModulesPathOverride: nodeModulesPath,
++      workspaceName,
++      rootDirs,
++    });
+   } else {
+     const wasmBinding = resolveWasmBinding();
+     analyzer = await createAnalyzer(tsconfigFile.path, {

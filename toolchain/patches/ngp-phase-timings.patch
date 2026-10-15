@@ -1,0 +1,113 @@
+diff --git a/packages/compiler-cli/preprocessor/main.ts b/packages/compiler-cli/preprocessor/main.ts
+index 98c8901..ae9ad0b 100644
+--- a/packages/compiler-cli/preprocessor/main.ts
++++ b/packages/compiler-cli/preprocessor/main.ts
+@@ -18,9 +18,10 @@ import type {NgpCompilerOptions} from './src/compiler_options.js';
+ import {HybridCompiler, IAnalyzer} from './src/hybrid_compiler.js';
+ import {buildTypeCheckingConfig} from './src/tcb.js';
+ import {SidecarAnalyzer} from './src/analyzer_sidecar.js';
+-import {run} from './ngp.js';
++import {phaseTimings, run} from './ngp.js';
+ 
+ (async () => {
++  if (phaseTimings) phaseTimings.mainStart = performance.now();
+   try {
+     // Parse CLI arguments
+     const args = process.argv.slice(2);
+@@ -172,6 +173,7 @@ import {run} from './ngp.js';
+       rootDirs,
+     });
+ 
++    if (phaseTimings) phaseTimings.setup = performance.now() - phaseTimings.mainStart;
+     console.log('Processing files...');
+     await run(compiler, {outDir, rootDir, inPlace});
+   } catch (e) {
+diff --git a/packages/compiler-cli/preprocessor/ngp.ts b/packages/compiler-cli/preprocessor/ngp.ts
+index b6f6d90..db018ae 100644
+--- a/packages/compiler-cli/preprocessor/ngp.ts
++++ b/packages/compiler-cli/preprocessor/ngp.ts
+@@ -14,6 +14,29 @@ import {HybridCompiler} from './src/hybrid_compiler.js';
+ import {AnalysisResult} from './src/types.js';
+ import {ChunkContext} from './src/file_analysis.js';
+ 
++/**
++ * Opt-in phase timings for benchmarking (ng-hybrid-preprocessor-bench patch).
++ * Enabled by NGP_PHASE_TIMINGS=<file>; all values are milliseconds of wall time.
++ *
++ * The chunk-level phases are disjoint and run one after another, so together they cover
++ * `run()`. `codegenSum` adds up each file's `compiler.processFile` call; files in a chunk are
++ * processed concurrently, so it can include time a file spent waiting on another's I/O.
++ */
++export const phaseTimings = process.env['NGP_PHASE_TIMINGS']
++  ? {
++      file: process.env['NGP_PHASE_TIMINGS'],
++      mainStart: 0, // process start -> main() starts: Node bootstrap + module loading
++      setup: 0, // config reading, analyzer construction, HybridCompiler construction
++      analyzerWait: 0, // blocked waiting for the analyzer's next chunk
++      prepareChunk: 0,
++      processFiles: 0, // read, generate and write every file in each chunk
++      writeDiagnostics: 0,
++      codegenSum: 0,
++      chunks: 0,
++      files: 0,
++    }
++  : null;
++
+ export interface RunOptions {
+   outDir: string | null;
+   rootDir: string;
+@@ -26,20 +49,43 @@ export async function run(compiler: HybridCompiler, options: RunOptions): Promis
+     compiler.optimize && !compiler.emitDeclarationOnly
+       ? compiler.analyzeOptimized()
+       : compiler.analyze();
++  const t = phaseTimings;
++  const iterator = results[Symbol.asyncIterator]();
+   try {
+-    for await (const chunk of results) {
++    while (true) {
++      let mark = performance.now();
++      const next = await iterator.next();
++      if (t) t.analyzerWait += performance.now() - mark;
++      if (next.done) break;
++      const chunk = next.value;
++
+       // Pre-bind all files and analyze cycles in the chunk
++      mark = performance.now();
+       const chunkContext = await compiler.prepareChunk(chunk);
++      if (t) {
++        t.prepareChunk += performance.now() - mark;
++        t.chunks++;
++        t.files += chunk.files.length;
++      }
+ 
++      mark = performance.now();
+       await Promise.all(
+         chunk.files.map((file) =>
+           processFile(file, outDir, compiler, options, chunkContext, rootDir),
+         ),
+       );
++      if (t) t.processFiles += performance.now() - mark;
++
++      mark = performance.now();
+       await compiler.writeDiagnosticsFile();
++      if (t) t.writeDiagnostics += performance.now() - mark;
+     }
+   } finally {
+     compiler.analyzer.close();
++    if (t) {
++      const {file, ...values} = t;
++      await fs.writeFile(file, JSON.stringify({...values, total: performance.now()}) + '\n');
++    }
+   }
+ }
+ 
+@@ -54,7 +100,9 @@ async function processFile(
+   const {filePath} = file;
+ 
+   const content = await fs.readFile(filePath, 'utf-8');
++  const codegenStart = performance.now();
+   const processed = await compiler.processFile(filePath, content, file, chunkContext);
++  if (phaseTimings) phaseTimings.codegenSum += performance.now() - codegenStart;
+   const s = processed.magicString;
+ 
+   const writeOutput = outDir || options.inPlace;
