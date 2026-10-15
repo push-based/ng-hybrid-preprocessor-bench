@@ -112,6 +112,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     env:
+      # Corpus and compiler output live on a RAM disk: the runner's network disk adds noise
+      # that has nothing to do with either compiler, and ngp writes more files than ngc.
+      CORPUS_DIR: /dev/shm/corpus
+      BENCH_OUT_DIR: /dev/shm/bench-out
       SIZES: ${{ inputs.sizes || '100' }}
       SCENARIOS: ${{ inputs.scenarios || 'S1,S2' }}
       ENGINE: ${{ inputs.engine || 'native' }}

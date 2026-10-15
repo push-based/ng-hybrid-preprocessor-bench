@@ -4,7 +4,11 @@
 // SHA-256 over every file so you can check that. Workspaces have no node_modules of their own:
 // they live under this repo and resolve @angular/* from its root node_modules.
 //
-// Usage: node corpus/generate.mjs --components 1000 [--seed 1] [--out corpus/generated/<name>]
+// Usage: node corpus/generate.mjs --components 1000 [--seed 1] [--out <dir>]
+//
+// The default output directory is $CORPUS_DIR/<name>, or corpus/generated/<name> without it.
+// A workspace written outside this repo gets a node_modules symlink to the repo's, so packages
+// still resolve (CI generates onto a RAM disk this way).
 //
 // Shape of a generated app:
 //   src/app/app.ts                 root component: nav + router outlet
@@ -41,7 +45,8 @@ const N = Number(args.components);
 const SEED = Number(args.seed);
 if (!Number.isInteger(N) || N < 20) throw new Error('--components must be an integer >= 20');
 const name = `standalone-${N}-s${SEED}`;
-const outDir = path.resolve(args.out ?? path.join(root, 'corpus/generated', name));
+const corpusDir = path.resolve(process.env['CORPUS_DIR'] ?? path.join(root, 'corpus/generated'));
+const outDir = path.resolve(args.out ?? path.join(corpusDir, name));
 
 // Probabilities. Changing any of these changes every generated app, so bump GENERATOR_VERSION.
 const GENERATOR_VERSION = 1;
@@ -694,6 +699,9 @@ for (const [rel, content] of files) {
   const abs = path.join(outDir, rel);
   await fs.mkdir(path.dirname(abs), {recursive: true});
   await fs.writeFile(abs, content);
+}
+if (path.relative(root, outDir).startsWith('..')) {
+  await fs.symlink(path.join(root, 'node_modules'), path.join(outDir, 'node_modules'), 'dir');
 }
 
 const totalComponents =

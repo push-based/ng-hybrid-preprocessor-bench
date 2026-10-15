@@ -32,7 +32,8 @@ if (positionals.length !== 1) {
   process.exit(1);
 }
 
-let workspace = path.resolve(positionals[0]);
+// Real path: ngp --out overwrites sources when its input path runs through a symlink.
+let workspace = await fs.realpath(path.resolve(positionals[0]));
 const manifest = JSON.parse(await fs.readFile(path.join(workspace, 'manifest.json'), 'utf8'));
 const negative = args['negative-control'];
 const label = manifest.name + (negative ? ' (negative control)' : '');

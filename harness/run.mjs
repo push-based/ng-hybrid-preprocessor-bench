@@ -15,6 +15,7 @@
 //          [--runs 10] [--warmup 2] [--phase-runs 3] [--seed 1]
 // Writes results/runs/<run-id>/ and then the report (harness/report.mjs).
 //
+// Generated apps are read from CORPUS_DIR (default: corpus/generated).
 // Compiler output goes to BENCH_OUT_DIR (default: the OS temp directory), never into the project:
 // IDEs and Spotlight react to thousands of new files there and add noise to the timings.
 
@@ -23,6 +24,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {parseArgs} from 'node:util';
+import {verifyCorpus} from './lib/corpus.mjs';
 import {captureEnvironment} from './lib/environment.mjs';
 import {engineEnv, hyperfineBin, ngpMain, root} from './lib/paths.mjs';
 import {summarize} from './lib/stats.mjs';
@@ -48,9 +50,16 @@ for (const s of scenarios) if (!SCENARIOS[s]) throw new Error(`unknown scenario 
 const sizes = args.size.split(',').map((s) => Number(s.trim()));
 const engine = args.engine;
 const runs = Number(args.runs);
-const benchOut = path.resolve(
+// Real paths only: when ngp's input path runs through a symlink (macOS's /var -> /private/var),
+// `ngp --out` computes output paths relative to the wrong root and overwrites the sources.
+const corpusDir = await fs.realpath(
+  path.resolve(process.env['CORPUS_DIR'] ?? path.join(root, 'corpus/generated')),
+);
+const benchOutRequested = path.resolve(
   process.env['BENCH_OUT_DIR'] ?? path.join(os.tmpdir(), 'ng-hybrid-preprocessor-bench'),
 );
+await fs.mkdir(benchOutRequested, {recursive: true});
+const benchOut = await fs.realpath(benchOutRequested);
 const warmup = Number(args.warmup);
 const phaseRuns = Number(args['phase-runs']);
 
@@ -97,7 +106,7 @@ for (const scenarioId of scenarios) {
   const scenario = SCENARIOS[scenarioId];
   for (const size of sizes) {
     const name = `standalone-${size}-s${args.seed}`;
-    const workspace = path.join(root, 'corpus/generated', name);
+    const workspace = path.join(corpusDir, name);
     const manifest = JSON.parse(await fs.readFile(path.join(workspace, 'manifest.json'), 'utf8'));
     const out = path.join(benchOut, `${scenarioId}-${size}`);
     const baseOut = path.join(out, 'baseline');
@@ -128,6 +137,8 @@ for (const scenarioId of scenarios) {
 
     // 1. Correctness gate
     await wipe();
+    result.corpusIntactBefore = await verifyCorpus(workspace, manifest);
+    if (!result.corpusIntactBefore) throw new Error(`${name} does not match its manifest; regenerate it`);
     const gBase = timed(baselineArgs(['--diagnostics']));
     const baseJs = await countFiles(baseOut, (n) => n.endsWith('.js'));
     const gNgp = timed(ngpArgs, {...ngpEnv, NG_EXP_DEBUG_LOADER: '1'});
@@ -223,8 +234,10 @@ for (const scenarioId of scenarios) {
       result.phaseRuns = phases;
     }
 
-    await fs.writeFile(path.join(runDir, `${scenarioId}-${size}.json`), JSON.stringify(result, null, 2) + '\n');
     await wipe();
+    result.corpusIntactAfter = await verifyCorpus(workspace, manifest);
+    await fs.writeFile(path.join(runDir, `${scenarioId}-${size}.json`), JSON.stringify(result, null, 2) + '\n');
+    if (!result.corpusIntactAfter) throw new Error(`${name} changed during the benchmark; results are invalid`);
   }
 }
 
