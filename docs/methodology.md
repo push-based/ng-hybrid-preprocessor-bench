@@ -1,54 +1,51 @@
 # Benchmark methodology
 
-This is the plan for measuring ngp against ngc. It follows from the hypotheses in [research.md](research.md). The harness doesn't exist yet. When it does, this file becomes its specification, and any change to a scenario changes this file first.
+This is how the benchmark measures ngp against ngc. It follows from the hypotheses in [research.md](research.md), and it describes what [harness/run.mjs](../harness/run.mjs) does. A change to a scenario changes this file first.
 
 ## The rule every scenario follows
 
-Compare pipelines that finish the same job. ngp on its own neither type-checks nor emits JavaScript, so timing `ngp` against `ngc -p` would compare half a build with a whole one. Each scenario names the job, then the two pipelines that complete it.
+Compare pipelines that finish the same job. ngp on its own neither type-checks nor emits JavaScript, so timing `ngp` against `ngc -p` would compare half a build with a whole one. Each scenario names the job, then the pipelines that complete it.
 
-Both sides also get the same compiler options. Extended template diagnostics are off in the baseline until ngp implements them (angular/angular#71316), and the report states which checks ran.
+Both sides also get the same compiler options:
+
+- extended template diagnostics are off in the ngc baseline, because ngp doesn't implement them yet (angular/angular#71316);
+- `noUnusedLocals` and `noUnusedParameters` are off on both sides, because ngp's generated code fails them (TS6133 on compiled templates' unused `ctx` parameters and never-called `_tcbN` functions);
+- every Node process gets the same heap limit, `--max-old-space-size=6144`.
 
 ## Scenarios
 
-| ID | Job | Baseline | Candidate | Tests hypothesis |
+| ID | Job | Baseline | Candidates | Tests hypothesis |
 |---|---|---|---|---|
-| S1 | Transform only: Angular source to JavaScript, no type-checking | `ngc` in `experimental-local` mode: analyze and emit, no diagnostics | `ngp` default mode, then `esbuild` transform | 1, 2 |
-| S2 | Transform with cross-file optimization | `ngc` in full mode: analyze and emit, no diagnostics | `ngp --optimize`, then `esbuild` transform | 1, 2 |
-| S3 | Full type-check of templates and TypeScript | `ngc -p` with `noEmit` | `ngp --optimize`, then `tsc --noEmit` (TypeScript 6.0) over `.ng.ts` and `.ngtypecheck.ts` | 3 |
-| S4 | Same as S3, on TypeScript 7 | the S3 baseline | `ngp --optimize`, then `tsgo --noEmit` | 3 |
-| S5 | Engine comparison | none | the S2 candidate with the native, wasm and sidecar engines forced in turn | 4 |
-| S6 | Rebuild after one edit | `ngc` incremental (`NgtscProgram` with `oldProgram`) | `HybridCompiler` with `updateFileContent`, then `analyzeOptimizedDelta` | 5 |
-| S7 | Development bundle | `ng build --configuration development` | ngp's `serve` pipeline: `ngp`, then `esbuild` bundle | indicative only |
+| S1 | Angular source to JavaScript, no type-checking | ngc in `experimental-local` mode: analyze and emit, no diagnostics | `ngp`, then esbuild | 1, 2 |
+| S2 | Same, with cross-file optimization | ngc in full mode: analyze and emit, no diagnostics | `ngp --optimize`, then esbuild | 1, 2 |
+| S3 | Type-check templates and TypeScript, emit nothing | ngc's full type-check | `ngp --optimize`, then `tsc` 6 | 3 |
+| S4 | Same, on TypeScript 7 | the S3 baseline, in the same run | `ngp --optimize`, then `tsgo` 7 | 3 |
+| S5 | The S2 job on each analyzer engine | ngc in full mode | the S2 candidate on native, wasm and sidecar | 4 |
+| S6 | Rebuild after one edit | ngc, reusing its previous program | ngp, sending the edit to its analyzer | 5 |
+| S7 | A development build that boots in a browser | `ng build --configuration development --aot` | `ngp --optimize`, then an esbuild bundle; and the same plus `tsgo` | indicative only |
 | R | Reference: a normal `ng build`, development and production | none | none | context for S1 and S2 |
 
-S1 and S2 are implemented in [harness/run.mjs](../harness/run.mjs). The baseline, [harness/ngc-transform.mjs](../harness/ngc-transform.mjs), drives `NgtscProgram` the way the Angular CLI's AOT compilation does: it loads and analyzes the program, then emits JavaScript with Angular's transformers. It never requests diagnostics, so ngc generates no type-check blocks and TypeScript skips its semantic check. The candidate, [harness/esbuild-transform.mjs](../harness/esbuild-transform.mjs), turns ngp's `.ts` output into one `.js` per file with the workspace's tsconfig and skips the `.ngtypecheck.ts` files.
+**S1 and S2.** The baseline, [harness/ngc-transform.mjs](../harness/ngc-transform.mjs), drives `NgtscProgram` the way the Angular CLI's AOT compilation does: it loads and analyzes the program, then emits JavaScript with Angular's transformers. It never requests diagnostics, so ngc builds no type-check blocks and TypeScript skips its semantic check. The candidate, [harness/esbuild-transform.mjs](../harness/esbuild-transform.mjs), turns ngp's `.ts` output into one `.js` per file with the app's tsconfig. Two asymmetries remain, and both cost ngp time: `ngp --optimize` always writes type-check blocks, which the S2 baseline doesn't build, and the candidate runs as two processes, so it pays Node startup twice.
 
-Two asymmetries remain, and both cost ngp time:
+**S3 and S4.** The baseline, [harness/ngc-typecheck.mjs](../harness/ngc-typecheck.mjs), collects every TypeScript and Angular diagnostic without emitting, which is the work `ngc --noEmit` does. The candidates type-check everything ngp wrote, `.ts` and `.ngtypecheck.ts`, with a tsconfig that extends the app's own. That config points the app's path aliases at ngp's output first, and uses `rootDirs` so files ngp doesn't emit (JSON, hand-written `.d.ts`) resolve from the app. TypeScript 7 is installed as `typescript7` (7.0.2), because Angular needs `typescript` 6 by that name.
 
-- `ngp --optimize` always generates type-check blocks, and ngp has no option to skip them. In S2, ngp does work the baseline doesn't.
-- The candidate runs as two processes, ngp then esbuild, so it pays Node startup twice. A CLI integration would run both in one process.
+**S5.** The S2 job, with the engine forced through the loader, so it can't silently fall back. native is the N-API addon and uses every core. wasm is single-threaded. sidecar is a separate process that speaks JSON over stdio.
 
-S1 and S2 time only the compiler step. A real `ng build` also type-checks, bundles, processes stylesheets and, in production, optimizes. R puts the compiler step in context. It times a cold `ng build` of the same apps, development and production, with the CLI cache (`.angular/`) cleared before each run, and reads the CLI's own phase timings (`NG_BUILD_DEBUG_PERF=1`). The report splits each build into:
+**S6.** [harness/incremental.mjs](../harness/incremental.mjs) copies the app to a scratch directory and runs one worker per compiler, so neither inherits the other's heap. Three edits, each applied, timed, then reverted:
 
-- Angular compilation: program creation, analysis, finding affected files and TypeScript emit, which is the work ngp replaces;
-- type-check: the CLI's diagnostics phase, which moves to a separate TypeScript run with ngp;
-- optimization: production chunk optimization, which nothing in this repo changes.
+- a component's class body: a new signal field;
+- a component's external template: one more element;
+- the `Item` interface every component imports: a new optional field.
 
-R has no ngp column, because ngp can't run inside the CLI yet. The CLI bundles while it compiles, so its phases overlap, and the report shows each as a share of the whole build rather than as slices that sum to 100%.
+ngc gets a caching compiler host and a new `NgtscProgram` that reuses the previous one, with `getModifiedResourceFiles` for template edits, which is what ngc's watch mode and the CLI do. ngc saves its incremental state only after template type-checking, and S6 rebuilds without type-checking, so the worker saves that state itself after emit. That gives ngc its best case; without it, every ngc rebuild is a full compile. ngp gets one `HybridCompiler` for the session. A rebuild sends the edit to the analyzer (`updateFileContent`), runs `analyzeOptimizedDelta`, and regenerates the `.ts` files the analyzer reports stale. Both sides write output, and ngp's goes through esbuild, so the job matches S2. After each edit's timed rounds, the incremental output is compared byte for byte with a fresh build of the same sources.
 
-S4 depends on `tsgo` accepting ngp's TCB output. The first run checks that, and if it fails, S4 reports the error instead of a time.
+**S7.** [harness/ngp-bundle.mjs](../harness/ngp-bundle.mjs) bundles ngp's output with esbuild the way ngp's own `serve` tool does, running Angular's linker over npm packages that ship partially compiled. [harness/boot-check.mjs](../harness/boot-check.mjs) opens each build in headless Chrome and passes only if the root component and the first lazy route render without console errors. S7 is labelled indicative: the ngp pipeline skips stylesheet processing, budgets and asset handling, and runs its steps one after another where the CLI overlaps them.
 
-S7 is labelled indicative because the CLI does work the ngp pipeline skips, including stylesheet compilation, budgets and asset hashing. The Angular team has said they won't publish numbers until they can run this comparison through the CLI. S7 stays in the report so you can see the gap shrink as integration lands.
-
-S6 measures three edits, each restored before the next run:
-
-- a component's class body, such as adding a field;
-- a component's external template, such as adding a binding;
-- an exported symbol in a shared library that many components import.
+**R.** A cold `ng build` of the same apps, development and production, with the CLI cache (`.angular/`) cleared before each run. It reads the CLI's own phase timings (`NG_BUILD_DEBUG_PERF=1`) and splits each build into Angular compilation (the work ngp replaces), type-check (which moves to a separate TypeScript run with ngp) and production optimization (which nothing here changes). Phases overlap because the CLI bundles while it compiles, so the report shows each as a share of the build rather than slices that add up to 100%. Builds pass `--aot`, because an app's development configuration can be a JIT build; Super Productivity's is.
 
 ## Phase timing inside ngp
 
-Wall time for S2 says how long ngp took. It doesn't say whether Rust or TypeScript took it, which is what hypothesis 2 needs. [toolchain/patches/ngp-phase-timings.patch](../toolchain/patches/ngp-phase-timings.patch) instruments ngp's own CLI loop. It's off unless `NGP_PHASE_TIMINGS=<file>` is set, and it records these phases in wall-clock milliseconds:
+Wall time says how long ngp took, not whether Rust or TypeScript took it, which is what hypothesis 2 needs. [toolchain/patches/ngp-phase-timings.patch](../toolchain/patches/ngp-phase-timings.patch) instruments ngp's own CLI loop. It's off unless `NGP_PHASE_TIMINGS=<file>` is set, and it records these phases in wall-clock milliseconds:
 
 | Phase | What it covers |
 |---|---|
@@ -59,13 +56,13 @@ Wall time for S2 says how long ngp took. It doesn't say whether Rust or TypeScri
 | Process files | reading, generating and writing every file, in TypeScript |
 | Diagnostics writes | rewriting `.ngdiag.json` after each chunk |
 
-The backend handles one chunk at a time, so these phases don't overlap and they add up to ngp's wall time. "Waiting on analyzer" measures how long the backend was blocked. It's not the analyzer's CPU time, because the analyzer keeps working on its own threads while the backend generates code.
+The backend handles one chunk at a time, so these phases don't overlap and add up to ngp's wall time. "Waiting on analyzer" isn't the analyzer's CPU time, because the analyzer keeps working on its own threads while the backend generates code.
 
-The ngc baseline gets its breakdown from `angularCompilerOptions.tracePerformance`, which reports program creation, analysis, resolution, compilation and emit. Phase runs are separate from the hyperfine runs, so instrumentation never touches the headline numbers, and each phase run also records peak RSS through `/usr/bin/time`.
+The ngc baselines get their breakdown from `angularCompilerOptions.tracePerformance`, and `ng build` from `NG_BUILD_DEBUG_PERF`. Phase runs are separate from the hyperfine runs, so instrumentation never touches the headline numbers. Each phase run also records peak RSS through `/usr/bin/time`.
 
 ## Corpus
 
-**Synthetic apps** come from [corpus/generate.mjs](../corpus/generate.mjs), which writes a standard Angular CLI workspace from a component count and a seed. The same inputs always produce byte-identical files, and each workspace's `manifest.json` records a SHA-256 over them. The apps are all standalone, with no NgModules, because that's what a new Angular app looks like today.
+**Generated apps** come from [corpus/generate.mjs](../corpus/generate.mjs), which writes a standard Angular CLI workspace from a component count and a seed. The same inputs always produce byte-identical files, and each workspace's `manifest.json` records a SHA-256 over them. The apps are all standalone, with no NgModules, because that's what a new Angular app looks like today.
 
 | Size | Features | Shared components | Pipes and directives | `.ts` files | All files |
 |---|---|---|---|---|---|
@@ -73,72 +70,58 @@ The ngc baseline gets its breakdown from `angularCompilerOptions.tracePerformanc
 | 1,000 | 45 | 100 | 20 + 20 | 1,089 | 1,792 |
 | 5,000 | 225 | 500 | 100 + 100 | 5,429 | 8,929 |
 
-Each app is a router shell with one lazy route per feature. A feature holds a page, about 20 child components wired as an acyclic graph, and a root-provided signal store. Every child has the same signal inputs (`label`, `count`, `items`) and a `selected` output, so any parent can bind any child. The templates vary, and these shares are seeded:
+Each app is a router shell with one lazy route per feature. A feature holds a page, about 20 child components wired as an acyclic graph, and a root-provided signal store. Every child has the same signal inputs (`label`, `count`, `items`) and a `selected` output, so any parent can bind any child. The templates vary, with seeded shares: half use external `.html` files and a fifth external `.css`; they use control flow, `@let`, `@defer (on viewport)`, `@angular/common` pipes, and custom pipes and directives from a shared library; there's two-way binding to a `model()` input, host bindings, and `OnPush` on about 70% of components. Templates compile under `strictTemplates`, so a type error anywhere fails both compilers. Three sizes test hypothesis 1: a single large app can show ngp is faster without showing how the gap grows.
 
-- half use external `.html` files, and a fifth use external `.css`;
-- control flow (`@if`, `@for`, `@switch`), `@let`, `@defer (on viewport)`, `@angular/common` pipes, and custom pipes and directives from a shared library;
-- two-way binding to a `model()` input, host bindings, and `OnPush` on about 70% of components.
+**Real apps** are pinned in [corpus/real/](../corpus/real/) and fetched by [corpus/fetch-real.mjs](../corpus/fetch-real.mjs), which pins every Angular package to `22.3.0-next.2`, the version the ngp toolchain is built from, and installs with the app's own lockfile.
 
-Templates compile under `strictTemplates`, so a type error anywhere fails both compilers. Scaling across three sizes is what tests hypothesis 1. A single large app can show ngp is faster without showing how the gap grows.
+| App | Commit | Kind | Source files | Components | Notes |
+|---|---|---|---:|---:|---|
+| [Super Productivity](https://github.com/johannesjo/super-productivity) | `65145cd` | Angular CLI, npm workspaces | 1,462 | 252 | `strictTemplates` off; doesn't type-check under TypeScript 7 on its own sources |
+| [Ghostfolio](https://github.com/ghostfolio/ghostfolio) | `204f0d8` | Nx monorepo, app plus `libs/` | 521 | 157 | no `angular.json`, so R doesn't apply |
 
-[corpus/check.mjs](../corpus/check.mjs) checks a workspace before any timing runs on it. It compiles the app with `ngc`, then runs `ngp --optimize` and type-checks ngp's output with `tsc`. With `--negative-control`, it plants one template type error and passes only if every pipeline rejects it.
+Both install with `--legacy-peer-deps`, because libraries declare peer ranges like `^22.0.0` that npm says a prerelease doesn't satisfy, and with `--min-release-age=0`, because Super Productivity's `.npmrc` refuses packages younger than three days. S6 and S7 run on generated apps only: S6 picks its edits from the generated layout, and S7's boot check looks for the generated apps' markup.
 
-**Real apps.** At least two open-source Angular apps, pinned by commit and upgraded to `22.3.0-next.2`. Super Productivity and Bitwarden's web vault are candidates because VoidZero published numbers for both, though for a different compiler and a different comparison. [TK: confirm each candidate's Angular version, and whether it upgrades to 22.3 with TypeScript 6.0 without patches.]
-
-**Golden cases.** Angular's own preprocessor golden tests (`packages/compiler-cli/preprocessor/test/golden`) aren't a performance corpus. They're cheap, and they show whether the locally built ngp produces the output Angular expects before any timing runs.
+**Golden cases.** Angular's own preprocessor golden tests aren't a performance corpus, but they show whether the locally built ngp produces the output Angular expects before any timing runs. `pnpm smoke` runs all of them on every engine.
 
 ## What gets measured
 
 | Metric | Tool | Why |
 |---|---|---|
-| Wall time, median and p95 | `hyperfine` for whole processes, `performance.now()` for in-process phases | headline speed |
+| Wall time, median and p95 | `hyperfine` for whole processes, `performance.now()` for in-process phases and S6 | headline speed |
 | CPU time, user plus system | `hyperfine` | shows parallel work that wall time hides |
-| Parallelism, CPU over wall | derived | tests hypothesis 4 directly |
+| Parallelism, CPU over wall | derived | tests hypothesis 4 |
 | Peak RSS | `/usr/bin/time -l` on macOS, `/usr/bin/time -v` on Linux | tests hypothesis 6 |
-| Diagnostics, by error code | both compilers' outputs | parity check, see below |
-| Bundle size, raw and gzip | esbuild metafile | `--optimize` should match ngc |
+| Type errors, by code and location | both sides' output, mapped back to templates | diagnostics parity |
 
-Each data point uses 2 warm-up runs and at least 10 measured runs, with output directories deleted in a `--prepare` step. The report shows median, p95 and the median absolute deviation. If the deviation exceeds 5% of the median, the report flags the result as noisy.
+Each data point uses warm-up runs and measured runs, with outputs wiped before each. Full runs use 2 and 10. The report shows median and p95, and flags a result as noisy when its median absolute deviation exceeds 5% of its median.
 
 ## Correctness gates
 
-A run only produces a timing if it passes these checks. Otherwise the harness records the failure.
+Every pipeline must finish its job correctly before it's timed. A failed gate is recorded, and that pipeline isn't timed.
 
-1. **It compiles.** ngp exits 0 and writes an output file for every input.
-2. **It runs.** For S7, the development bundle boots in headless Chrome without console errors.
-3. **Diagnostics match.** S3 and S4 report the same set of error codes and locations as ngc. Any difference is listed in the report, since the Angular team expects a few rare new type errors. Plain `tsc` reports a template error at its line in the `.ngtypecheck.ts` file, while ngc reports it in the `.html` or inline template. The harness has to map TCB locations back to the template through the span comments ngp writes into the TCB, such as `/*270,277*/`, before it can compare locations.
-4. **Bundles match.** With `--optimize`, bundle size stays within 1% of ngc's.
-5. **The input is unchanged.** Before and after timing, the app's files match the SHA-256 in its manifest. `ngp --out` overwrites sources when its input path runs through a symlink, so the harness checks rather than assumes.
+1. **It compiles.** ngp exits 0 with no diagnostics, and the engine that loaded is the one requested. On generated apps, ngp writes exactly one output and, with `--optimize`, one type-check block per source file, and esbuild turns each into JavaScript. On real apps the count can sit lower, because ngp skips type-only modules, so what must hold is that every follow-up step succeeds on what ngp wrote.
+2. **The type-checker saw ngp's code.** For S3 and S4, `tsc --listFilesOnly` confirms the checker's program contains ngp's output. A clean result on zero files would otherwise look like a fast pass.
+3. **Diagnostics are compared.** S3 and S4 map every error in a `.ngtypecheck.ts` file back to its template, using the type-check block's `TCB for <file>` header, its `_tcbN(this: Class)` function and the span comment after the error's position, and compare the result with ngc's errors. On generated apps both sides must be clean. On real apps a difference is a result: the run is timed, and the report lists every error ngp adds or misses, and which extra errors TypeScript 7 also reports on the app's own sources. The negative control in [corpus/check.mjs](../corpus/check.mjs) plants one template type error and passes only if ngc, `tsc` and `tsgo` all report it with the same code at the same file, line and column, for inline and external templates.
+4. **It runs.** For S7, the build boots in headless Chrome. A deliberately broken bundle fails this check.
+5. **Rebuilds are correct.** For S6, each compiler's incremental output matches a fresh build byte for byte.
+6. **The input is unchanged.** Before and after timing, the app's files match the SHA-256 in its manifest, because `ngp --out` overwrites sources when its input path runs through a symlink.
 
-A compiler that fails gate 1 on an app tells you more about ngp's readiness than any timing would, so the report shows failures next to the timings.
+Not implemented yet: comparing bundle sizes between ngc's and ngp's `--optimize` output.
 
 ## Environment
 
-Every result file records:
+Every result file records the Angular commit, the `@angular/compiler-cli`, TypeScript, esbuild, Rust and hyperfine versions, the SHA-256 of `Cargo.lock`, each engine binary and each local patch, the engine that actually loaded, the CPU model, cores, memory and OS, the power source, the load average, and on CI the run, commit and runner image.
 
-- Angular commit SHA, `@angular/compiler-cli` version, and the `Cargo.lock` hash for `ng-analyze`;
-- TypeScript 6 and `tsgo` versions, Node version, Rust version;
-- which engine actually loaded, from the loader's own debug log, not the one requested;
-- SHA-256 of `Cargo.lock`, each engine binary, and each local patch;
-- CPU model, core count, RAM, OS, and whether the machine was on battery.
+Published results come from GitHub Actions ([.github/workflows/bench.yml](../.github/workflows/bench.yml)), so anyone with access can see how a number was produced and rerun it. Each scenario runs as its own job on its own runner, and a final job merges the reports. Standard runners have 2 cores and a different CPU model each time, so a report compares ratios inside one scenario's section and names that section's machine. The generated apps and all compiler output live on a RAM disk (`/dev/shm`): on the runner's network disk, ngp waited on I/O for over a second of a 7-second run, and its medians varied by more than 5%. Real apps keep their `node_modules` on disk.
 
-The native engine sizes its thread pool from `available_parallelism()` and has no override. To test scaling by core count on Linux, run under `taskset`. macOS has no equivalent, so core-scaling results come from Linux only.
-
-Every Node process, on both sides, runs with the same heap limit, `--max-old-space-size=6144`. On an 8 GB runner, Node's default heap is about 2 GB, and ngc's full compile with template type-checking of the 5,000-component app runs out of memory at that limit (exit 134; it peaks at 2.7 GB with the larger heap). The report states the limit.
-
-Published results come from GitHub Actions ([.github/workflows/bench.yml](../.github/workflows/bench.yml)), not from a laptop, so anyone with access can see how a number was produced and rerun it. Standard runners have 2 cores and change CPU model between runs, so a report compares ratios inside one run and records the CPU, the runner image and the load average. The generated apps and all compiler output live on a RAM disk (`/dev/shm`). On the runner's network disk, ngp waited on I/O for over a second of a 7-second run, and its medians varied by more than 5%.
+The native engine sizes its thread pool from `available_parallelism()` and has no override. On 2-core runners it has little room to show its parallelism; testing more cores means larger runners or Linux's `taskset`.
 
 ## Layout
 
 ```text
 toolchain/   build ngp from a pinned Angular SHA: TS backend, native, wasm, sidecar; hyperfine
-corpus/      synthetic generator and the ngc/ngp compile check
-harness/     runner, baseline and esbuild steps, statistics, environment capture, report
-results/     smoke-test JSON, and one directory per benchmark run with raw data and report.md
+corpus/      generator, real-app pins and fetcher, the ngc/ngp compile check
+harness/     runner, baselines, follow-up steps, S6 workers, boot check, statistics, report
+results/     local smoke and run output (CI keeps its results as artifacts)
 docs/        research, this methodology
 ```
-
-## Open questions
-
-- Does `tsgo` type-check ngp's `.ngtypecheck.ts` files today? S4 depends on it.
-- Which ngc API gives an incremental baseline for S6 that matches what the CLI's watch mode does?
