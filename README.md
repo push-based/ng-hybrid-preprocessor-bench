@@ -39,10 +39,10 @@ ngc type-checks templates inside its own TypeScript 6 program. ngp writes the ty
 | generated | 100 | 2.65 s | 3.19 s | **0.83×** | 1.47 s | **1.80×** | 461 / 239 MB |
 | generated | 1,000 | 8.64 s | 13.8 s | **0.63×** | 8.41 s | **1.03×** | 816 / 1,024 MB |
 | generated | 5,000 | 27.8 s | 57.6 s | **0.48×** | 36.9 s | **0.75×** | 2,307 / 4,909 MB |
-| Super Productivity | 252 | 20.1 s | 30.7 s | **0.66×** | 16.7 s ⚠ | **1.21×** | 1,645 / 1,388 MB |
-| Ghostfolio | 157 | 11.3 s | 13.1 s ⚠ | **0.86×** | 8.63 s ⚠ | **1.31×** | 1,250 / 561 MB |
+| Super Productivity ² | 252 | 25.8 s | 28.8 s | **0.90×** | 13.8 s | **1.87×** | 1,716 / 1,362 MB |
+| Ghostfolio ² | 157 | 14.2 s | 14.6 s | **0.97×** | 6.96 s | **2.04×** | 1,224 / 537 MB |
 
-⚠ These results were noisy: run to run they varied by 7–12%, Ghostfolio's `tsgo` pipeline anywhere from 6.9 s to 13.9 s, while ngc on the same runner stayed within 3%. An earlier 3-run sample ([run 38874189074](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38874189074)) measured ngp + `tsgo` at 1.85× on Super Productivity and 2.06× on Ghostfolio. A rerun on a quieter runner ([run 38899025048](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38899025048), no result above 5%) settled it: ngp + `tsgo` is **1.87×** on Super Productivity and **2.04×** on Ghostfolio, matching the 3-run sample, so the ⚠ numbers above were the runner, not ngp. The rerun repeated the generated apps' ratios almost exactly: 1.75×, 1.05× and 0.75× with `tsgo`.
+² From a separate S3 run, [run 38899025048](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38899025048), where no result varied by more than 2.5%. In the full run, the real apps' ngp pipelines varied by 7–12% from run to run (Ghostfolio's `tsgo` pipeline anywhere from 6.9 s to 13.9 s) while ngc on the same runner stayed within 3%, so those numbers are left out. The rerun matches an earlier 3-run sample (1.85× and 2.06× with `tsgo`) and repeats the generated apps' ratios almost exactly: 1.75×, 1.05× and 0.75× with `tsgo`.
 
 TypeScript 7 roughly halves the type-check of ngp's output compared with TypeScript 6. That's enough for ngp to beat ngc on small apps, not on large ones: at 5,000 components, `tsgo` alone takes 18.6 s and ngp's pipeline peaks at 4.9 GB, against ngc's 2.3 GB. ngc builds its type-check blocks in memory and checks them in the program it already has; ngp's route means a second, separate program over twice as many files, 5,429 outputs plus 5,429 type-check blocks. `tsgo` is multithreaded and these runners have 2 cores, so more cores should help it, and this repo hasn't measured that yet.
 
