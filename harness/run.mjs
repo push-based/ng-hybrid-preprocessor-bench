@@ -9,6 +9,7 @@
 //   S6  rebuild after one edit        in-process, see harness/incremental.mjs
 //   S7  development bundle            ng build (development)    vs  ngp --optimize, then an esbuild bundle
 //                                                                   ...and the same plus tsgo
+//   S8  full compile (ViteConf 2026)  ngc: type-check + emit    vs  ngp --optimize, then tsgo 7 / tsc 6 type-check + emit
 //   R   reference                     ng build (development and production) with the CLI's own phases
 //
 // For every scenario and target it does three things, in this order:
@@ -19,7 +20,7 @@
 //   3. Phase runs under /usr/bin/time: ngc's tracePerformance phases or the CLI's NG_BUILD_DEBUG_PERF
 //      phases, ngp's NGP_PHASE_TIMINGS phases, each follow-up step on its own, and peak RSS.
 //
-// Usage: node harness/run.mjs [--scenario S1,S2,S3,S5,S6,S7,R] [--size 100,1000,5000,real:<name>]
+// Usage: node harness/run.mjs [--scenario S1,S2,S3,S5,S6,S7,S8,R] [--size 100,1000,5000,real:<name>]
 //          [--engine native] [--runs 10] [--warmup 2] [--phase-runs 3] [--seed 1] [--heap-mb 6144]
 //
 // A target is a generated app size, or `real:<name>` for a pinned real app (corpus/real/).
@@ -46,7 +47,7 @@ import ts from 'typescript';
 
 const {values: args} = parseArgs({
   options: {
-    scenario: {type: 'string', default: 'S1,S2,S3,S5,S6,S7,R'},
+    scenario: {type: 'string', default: 'S1,S2,S3,S5,S6,S7,S8,R'},
     size: {type: 'string', default: '100,1000,5000'},
     engine: {type: 'string', default: 'native'},
     runs: {type: 'string', default: '10'},
@@ -65,6 +66,9 @@ const STEPS = {
   esbuild: (t, p) => ['harness/esbuild-transform.mjs', p.ngpOut, '--tsconfig', t.tsconfigRoot],
   tsc: (t, p) => [tscBin, '-p', p.checkConfig],
   tsgo: (t, p) => [tsgoBin, '-p', p.checkConfig],
+  // Type-check and emit JavaScript in one TypeScript run, as in the ViteConf 2026 comparison (S8).
+  'tsc-emit': (t, p) => [tscBin, '-p', p.emitConfig],
+  'tsgo-emit': (t, p) => [tsgoBin, '-p', p.emitConfig],
   bundle: (t, p) => ['harness/ngp-bundle.mjs', p.ngpOut, '--workspace', t.workspace, '--out', p.distOut],
 };
 
@@ -128,8 +132,23 @@ const SCENARIOS = {
       {id: 'S7-tsgo', label: 'ngp --optimize + bundle + tsgo', ngpArgs: ['--optimize'], steps: ['bundle', 'tsgo']},
     ],
   },
+  S8: {
+    title: 'Full compile: type-check and emit (the ViteConf 2026 comparison)',
+    description:
+      'The comparison Alex Rickabaugh showed at ViteConf 2026 (about 13 s to 4.5 s, "almost three times faster"): ' +
+      'the whole compiler job, type errors reported and JavaScript written. Baseline: ngc\'s full compile, as ' +
+      '`ngc -p` runs it: every diagnostic, then emit. Candidates: `ngp --optimize`, then one TypeScript run that ' +
+      'type-checks ngp\'s output and emits JavaScript: `tsgo` 7 (his setup) and `tsc` 6. TypeScript also emits the ' +
+      'type-check blocks, which costs the candidates a little.',
+    baseline: 'ngc-full-typecheck',
+    candidates: [
+      {id: 'S8', label: 'ngp --optimize + tsgo 7 (check + emit)', ngpArgs: ['--optimize'], steps: ['tsgo-emit']},
+      {id: 'S8-tsc', label: 'ngp --optimize + tsc 6 (check + emit)', ngpArgs: ['--optimize'], steps: ['tsc-emit']},
+    ],
+  },
   R: {title: 'Full ng build (reference, not a comparison)', reference: true},
 };
+const TYPECHECK_STEPS = new Set(['tsc', 'tsgo', 'tsc-emit', 'tsgo-emit']);
 
 // S4 is measured inside S3 (same baseline, second candidate).
 const scenarios = [...new Set(args.scenario.split(',').map((s) => (s.trim() === 'S4' ? 'S3' : s.trim())))];
@@ -338,6 +357,13 @@ function baselineSpec(kind, t, out, sourceTs) {
       return transform('local');
     case 'ngc-full':
       return transform('full');
+    case 'ngc-full-typecheck':
+      return {
+        ...transform('full'),
+        label: 'ngc (full compile: type-check + emit)',
+        args: ['harness/ngc-transform.mjs', t.tsconfigApp, '--mode', 'full', '--typecheck', '--out', out, '--root', t.workspace],
+        gateArgs: [],
+      };
     case 'ngc-typecheck':
       return {
         label: 'ngc type-check',
@@ -381,6 +407,8 @@ async function runPair(scenarioId, scenario, t) {
       ngpOut: path.join(dir, 'ngp'),
       distOut: path.join(dir, 'dist'),
       checkConfig: path.join(out, `${c.id}.tsconfig.json`),
+      emitConfig: path.join(out, `${c.id}.emit.tsconfig.json`),
+      jsOut: path.join(dir, 'js'),
     };
     return {
       ...c,
@@ -401,33 +429,36 @@ async function runPair(scenarioId, scenario, t) {
     const modules = t.kind === 'real' ? path.join(t.workspace, 'node_modules') : path.join(root, 'node_modules');
     await fs.symlink(modules, path.join(out, 'node_modules'), 'dir').catch(() => {});
     for (const c of candidates) {
-      await fs.writeFile(
-        c.paths.checkConfig,
-        JSON.stringify({
-          extends: t.tsconfigRoot,
-          // rootDir only gates which files may be part of the program here (nothing is emitted).
-          // Path-alias fallbacks can resolve to the app's own non-Angular sources outside the
-          // output dir, so it has to contain everything.
-          // rootDirs merges ngp's output with the app folder for relative imports, output first:
-          // files ngp doesn't emit (JSON, hand-written .d.ts) resolve from the app, as they would
-          // in a build that compiled in memory.
-          compilerOptions: {
-            noEmit: true,
-            types: [],
-            // ngp's generated code (template functions' unused `ctx`, never-called _tcbN
-            // functions) fails these checks (TS6133). The ngc baseline turns them off too, so both
-            // type-checks do the same work; see harness/ngc-typecheck.mjs.
-            noUnusedLocals: false,
-            noUnusedParameters: false,
-            rootDir: '/',
-            rootDirs: [c.paths.ngpOut, t.workspace],
-            paths: remappedPaths(t, c.paths.ngpOut),
-          },
-          files: [],
-          // Everything ngp wrote, not just src/: Nx apps keep their code under apps/ and libs/.
-          include: [`${path.relative(out, c.paths.ngpOut)}/**/*.ts`],
-        }),
-      );
+      const config = {
+        extends: t.tsconfigRoot,
+        // rootDir only gates which files may be part of the program here. Path-alias fallbacks
+        // can resolve to the app's own non-Angular sources outside the output dir, so it has to
+        // contain everything. rootDirs merges ngp's output with the app folder for relative
+        // imports, output first: files ngp doesn't emit (JSON, hand-written .d.ts) resolve from
+        // the app, as they would in a build that compiled in memory.
+        compilerOptions: {
+          noEmit: true,
+          types: [],
+          // ngp's generated code (template functions' unused `ctx`, never-called _tcbN
+          // functions) fails these checks (TS6133). The ngc baseline turns them off too, so both
+          // type-checks do the same work; see harness/ngc-typecheck.mjs.
+          noUnusedLocals: false,
+          noUnusedParameters: false,
+          rootDir: '/',
+          rootDirs: [c.paths.ngpOut, t.workspace],
+          paths: remappedPaths(t, c.paths.ngpOut),
+        },
+        files: [],
+        // Everything ngp wrote, not just src/: Nx apps keep their code under apps/ and libs/.
+        include: [`${path.relative(out, c.paths.ngpOut)}/**/*.ts`],
+      };
+      await fs.writeFile(c.paths.checkConfig, JSON.stringify(config));
+      // S8's config: the same program, emitting JavaScript (with source maps, like the baseline).
+      const emit = {
+        ...config,
+        compilerOptions: {...config.compilerOptions, noEmit: false, outDir: c.paths.jsOut, sourceMap: true, declaration: false},
+      };
+      await fs.writeFile(c.paths.emitConfig, JSON.stringify(emit));
     }
   };
   const wipe = async () => {
@@ -457,7 +488,9 @@ async function runPair(scenarioId, scenario, t) {
   if (basePass && scenario.boot) basePass = boot(baseline.bootDir, t).pass;
   result.baseline.gate = {exit: gb.exit, pass: basePass};
   // ngc's own type errors, for the S3/S4 diagnostics comparison.
-  const baselineErrors = scenario.baseline === 'ngc-typecheck' ? errorKeys(gb.output, t, null) : [];
+  const baselineErrors = ['ngc-typecheck', 'ngc-full-typecheck'].includes(scenario.baseline)
+    ? errorKeys(gb.output, t, null)
+    : [];
   if (!basePass) result.baseline.gate.tail = tail(gb.output);
 
   for (const [i, c] of candidates.entries()) {
@@ -478,7 +511,7 @@ async function runPair(scenarioId, scenario, t) {
     // A clean type-check proves nothing if the checker never loaded ngp's files. Count how many of
     // them its program contains (TypeScript 6's --listFilesOnly; tsgo reads the same config).
     let checkedFiles = null;
-    if (c.steps.some((s) => s === 'tsc' || s === 'tsgo')) {
+    if (c.steps.some((s) => TYPECHECK_STEPS.has(s))) {
       const l = spawnSync(node, [tscBin, '-p', c.paths.checkConfig, '--listFilesOnly'], {
         cwd: root,
         encoding: 'utf8',
@@ -491,10 +524,10 @@ async function runPair(scenarioId, scenario, t) {
     // step passes the gate if the checker loaded ngp's files and finished with diagnostics.
     const typeCheck = {};
     for (const s of steps) {
-      if (s.name !== 'tsc' && s.name !== 'tsgo') continue;
+      if (!TYPECHECK_STEPS.has(s.name)) continue;
       const errors = errorKeys(s.output, t, c.paths.ngpOut);
       const extra = minus(errors, baselineErrors);
-      const ts7 = s.name === 'tsgo' && extra.length && t.kind === 'real' ? tsgoErrorsOnOriginal(t) : [];
+      const ts7 = s.name.startsWith('tsgo') && extra.length && t.kind === 'real' ? tsgoErrorsOnOriginal(t) : [];
       typeCheck[s.name] = {
         errors: errors.length,
         matchesNgc: extra.length === 0 && minus(baselineErrors, errors).length === 0,
@@ -510,6 +543,10 @@ async function runPair(scenarioId, scenario, t) {
     const js = c.steps.includes('esbuild')
       ? await countFiles(c.paths.ngpOut, (n) => n.endsWith('.js'))
       : null;
+    // S8: TypeScript's emit must cover every file ngp wrote (it also emits the type-check blocks).
+    const emittedJs = c.steps.some((s) => s.endsWith('-emit'))
+      ? await countFiles(c.paths.jsOut, (n) => n.endsWith('.js') && !n.endsWith('.ngtypecheck.js'))
+      : null;
     const optimize = c.ngpArgs.includes('--optimize');
     // Generated apps: exactly one output (and one type-check block) per source file. Real apps:
     // ngp skips type-only modules, so its count can sit below TypeScript's; what must hold is that
@@ -522,6 +559,7 @@ async function runPair(scenarioId, scenario, t) {
       g.exit === 0 &&
       diagnostics === 0 &&
       countsOk &&
+      (emittedJs === null || emittedJs >= emitted) &&
       (checkedFiles === null || checkedFiles >= emitted) &&
       loaded === c.engine &&
       steps.every((s) => s.exit === 0);
@@ -541,6 +579,7 @@ async function runPair(scenarioId, scenario, t) {
       finishedWithErrors: steps.filter((s) => s.finishedWithErrors).map((s) => s.name),
       checkedFiles,
       js,
+      emittedJs,
       boot: booted?.pass ?? null,
       pass,
     };

@@ -18,8 +18,8 @@ on:
         description: Real apps from corpus/real, comma-separated (super-productivity, ghostfolio)
         default: ''
       scenarios:
-        description: Scenarios, comma-separated (S1, S2, S3 incl. S4, S5, S6, S7, R)
-        default: S1,S2,S3,S5,S6,S7,R
+        description: Scenarios, comma-separated (S1, S2, S3 incl. S4, S5, S6, S7, S8, R)
+        default: S1,S2,S3,S5,S6,S7,S8,R
       engine:
         description: ngp analyzer engine for S1-S4, S6, S7 (native, wasm, sidecar)
         default: native
@@ -115,7 +115,7 @@ jobs:
     steps:
       - id: plan
         env:
-          SCENARIOS: ${{ inputs.scenarios || 'S1,S2,S3,S5,S6,S7,R' }}
+          SCENARIOS: ${{ inputs.scenarios || 'S1,S2,S3,S5,S6,S7,S8,R' }}
         run: |
           echo "scenarios=$(echo "$SCENARIOS" | tr -d ' ' | jq -Rc 'split(",") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
 

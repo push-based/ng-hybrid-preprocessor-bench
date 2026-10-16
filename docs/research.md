@@ -78,11 +78,38 @@ The `22.3.0-next` GitHub releases have no assets, and Angular's nightly `*-build
 
 The native addon needs no napi-rs CLI: the `cdylib` Cargo builds with `--features napi`, renamed to `.node`, loads through `require()`. If this path breaks on a later commit, the fallback is Angular's own Bazel target `//packages/compiler-cli/preprocessor:main`, which builds only the wasm engine.
 
+## What the Angular team said at ViteConf 2026
+
+Alex Rickabaugh, the Angular team's technical lead, presented ngp at [ViteConf 2026](https://youtu.be/PfyIEgLzNYI?t=32555) on 15 October 2026 (the talk runs from 9:02:35 to 9:22:05 of the stream). What follows is a summary in this repo's words, checked against the code where that's possible. The stream's auto-captions misspell several names; the corrected ones are Rickabaugh, ViteConf, Vite, Oxc, Boshen (Oxc's creator), Volar, napi-rs, Rolldown and NgModules.
+
+**Why ngc is built the way it is** ([9:06:48](https://youtu.be/PfyIEgLzNYI?t=32808)). ngc was designed in 2016 to see the whole program: every file and every dependency. That makes build time grow with project size, and it makes ngc depend on a full TypeScript build. He lists the limitations Angular removed one release at a time: compiling libraries together with apps (gone in Angular 4), the runtime's reliance on the compiler's pre-work (Ivy, Angular 9), NgModules (standalone components, Angular 14), and whole-program analysis (experimental local compilation, Angular 16; the `experimental-local` mode landed in angular/angular#49846 in April 2023). The last one is the S1 baseline here.
+
+**Why a preprocessor** ([9:10:20](https://youtu.be/PfyIEgLzNYI?t=33020)). ngc was meant as a drop-in replacement for `tsc`, but build tools stopped running TypeScript in the critical path, so Angular has been hard to integrate. The preprocessor compiles only the Angular parts, writes TypeScript with decorators replaced by runtime code plus a separate output for type-checking, and leaves type-checking off the edit-refresh path. Any bundler can take its output. TypeScript 7 turned this from a backlog idea into a necessity, because it has no transform API and ngc is built on one.
+
+**Why the split falls where it does** ([9:14:55](https://youtu.be/PfyIEgLzNYI?t=33295)). Porting Angular's template code generator to another language would be a large job: it carries a decade of edge cases, internationalization and bugs that apps depend on, and it also runs in browsers for just-in-time compilation. His observation is that the code generator is already fast and works one file at a time, while the front end, which parses the whole app, finds decorators, traces references and evaluates constants, is where the complexity and the time are. So only the front end moved to Rust. They chose Rust because of Oxc, which he describes as stable, well maintained and fast.
+
+**How the analyzer works** ([9:16:33](https://youtu.be/PfyIEgLzNYI?t=33393)). The analyzer, `ng-analyze`, reads the tsconfig and hands the Node-based code generator only the metadata it needs, including the source offsets to replace, so the generator never parses TypeScript. It answers queries and, when a file changes, invalidates only the queries whose answers could change. It has single-file and whole-program modes, runs multithreaded on Rust futures, and streams results so files are written while it is still parsing. All of this matches the source read for this repo; the streaming is what the "Waiting on analyzer" phase measures.
+
+**Three ways to load it** ([9:18:36](https://youtu.be/PfyIEgLzNYI?t=33516)): a native Node module through napi-rs for the best performance, WebAssembly where no native build exists or in a browser playground, and at Google a separate process over JSON-RPC, the sidecar. S5 compares the three.
+
+**The numbers he showed** ([9:19:29](https://youtu.be/PfyIEgLzNYI?t=33569)). For the compiler step alone, old ngc against the preprocessor followed by TypeScript 7, he reported about 13 s down to 4.5 s, "almost three times faster": about 3 s of Angular processing and 1.5 s of TypeScript 7 type-checking and emit. He named neither the app nor the machine, said the compiler isn't finished, and said they have barely optimized it. The team is testing it on every Angular app at Google, checking output against golden tests and against what ngc emitted before.
+
+### His claims, and where this repo tests them
+
+| Claim | Tested by | What this repo found |
+|---|---|---|
+| ngp plus TypeScript 7 is almost 3× faster than ngc for the whole compiler job | S8, which reproduces the comparison: `ngc` full compile against `ngp --optimize` then `tsgo` type-check and emit | first local run, Ghostfolio: 6.6 s against 2.3 s, 2.9×. CI numbers pending. |
+| The code generator is fast; the front end is where the time goes | phase timings in S1, S2, S3 and S5 | true of ngc. Inside ngp, the Node code generator now dominates: on Super Productivity, ngp waits on the analyzer for 0.3–0.8 s and spends 3–4 s generating code |
+| Type-checking leaves the edit-refresh path | S7 times a development bundle with and without `tsgo` | `tsgo` adds about 0.5 s to the 100-component bundle |
+| The analyzer invalidates only what a change affects | S6 | correct output after every edit, but ngp regenerates every file that imports the edited one (6 files at 100 components; 42 at 1,000 in a local run) where ngc re-emits 1–2 |
+| Native, wasm and sidecar share one engine | S5 | all three pass the same gates with the same file counts; wasm is 1.2–2× slower than native, the sidecar matches native |
+
 ## Sources
 
 - [angular/angular#71259](https://github.com/angular/angular/pull/71259), the integration PR, merged 8 October 2026
 - [Angular releases](https://github.com/angular/angular/releases), especially `22.3.0-next.2`
 - [An update on Angular's TypeScript 7-powered Compiler](https://blog.angular.dev/an-update-on-angulars-typescript-7-powered-compiler-9619a35e2b0a), Alex Rickabaugh and Mark Techson, 24 September 2026
 - [How we made the Angular Compiler faster using AI](https://voidzero.dev/posts/oxc-angular-compiler), VoidZero, on the separate `oxc-angular-compiler`, which skips template type-checking
+- [ViteConf 2026 stream](https://youtu.be/PfyIEgLzNYI?t=32555), Alex Rickabaugh's talk on ngp, 9:02:35–9:22:05, 15 October 2026
 - [Ng-News 26/22](https://dev.to/playfulprogramming-angular/ng-news-2622-typescript-71-angular-native-and-polymorpheus-4ej2), on TypeScript 7.1's interop API and the missing transformer API
 - Source files read: `preprocessor/main.ts`, `ngp.ts`, `api.ts`, `serve.ts`, `src/analyzer_loader.ts`, `src/hybrid_compiler.ts`, `ng-analyze/Cargo.toml`, `ng-analyze/src/compiler/analyzer.rs`, `ng-analyze/src/wasm.rs`, `ng-analyze/BUILD.bazel`

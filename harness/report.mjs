@@ -22,7 +22,7 @@ if (argv[0] === '--merge') {
 }
 
 // Load every run and its results, in a stable scenario order.
-const ORDER = ['S1', 'S2', 'S3', 'S5', 'S6', 'S7', 'R'];
+const ORDER = ['S1', 'S2', 'S3', 'S5', 'S6', 'S7', 'S8', 'R'];
 const sections = [];
 for (const dir of runDirs) {
   const run = JSON.parse(await fs.readFile(path.join(dir, 'run.json'), 'utf8'));

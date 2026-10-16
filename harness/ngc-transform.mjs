@@ -13,10 +13,14 @@
 // --trace writes ngc's own phase timings (angularCompilerOptions.tracePerformance).
 // --diagnostics also collects all diagnostics after emit and fails if there are any; the harness
 // uses it for the untimed correctness gate only.
+//
+// --typecheck makes this ngc's full compile, as `ngc -p` runs it: every TypeScript and Angular
+// diagnostic (template type-checking included) is collected before emit, and errors fail the run.
+// It uses the same option overrides as harness/ngc-typecheck.mjs. S8 uses it.
 
 import {parseArgs} from 'node:util';
 import * as path from 'node:path';
-import {NgtscProgram, createCompilerHost, readConfiguration} from '@angular/compiler-cli';
+import {NgtscProgram, createCompilerHost, formatDiagnostics, readConfiguration} from '@angular/compiler-cli';
 
 const {values: args, positionals} = parseArgs({
   allowPositionals: true,
@@ -25,6 +29,7 @@ const {values: args, positionals} = parseArgs({
     out: {type: 'string'},
     trace: {type: 'string'},
     diagnostics: {type: 'boolean', default: false},
+    typecheck: {type: 'boolean', default: false},
     root: {type: 'string'},
   },
 });
@@ -33,7 +38,18 @@ if (positionals.length !== 1 || !args.out || !['local', 'full'].includes(args.mo
   process.exit(1);
 }
 
-const config = readConfiguration(path.resolve(positionals[0]), {
+const tsconfig = path.resolve(positionals[0]);
+// Same overrides as the S3 baseline: unused-code checks off on both sides, extended diagnostics
+// suppressed where ngc accepts that (strictTemplates on).
+const typecheckOverrides = args.typecheck
+  ? {
+      noUnusedLocals: false,
+      noUnusedParameters: false,
+      ...(readConfiguration(tsconfig).options.strictTemplates ? {extendedDiagnostics: {defaultCategory: 'suppress'}} : {}),
+    }
+  : {};
+const config = readConfiguration(tsconfig, {
+  ...typecheckOverrides,
   outDir: path.resolve(args.out),
   noEmit: false,
   declaration: false,
@@ -50,6 +66,18 @@ if (config.errors.length > 0) {
 const host = createCompilerHost({options: config.options});
 const program = new NgtscProgram(config.rootNames, config.options, host);
 await program.loadNgStructureAsync();
+if (args.typecheck) {
+  const diags = [
+    ...program.getTsOptionDiagnostics(),
+    ...program.getNgOptionDiagnostics(),
+    ...program.getTsSyntacticDiagnostics(),
+    ...program.getNgStructuralDiagnostics(),
+    ...program.getTsSemanticDiagnostics(),
+    ...program.getNgSemanticDiagnostics(),
+  ];
+  if (diags.length > 0) console.error(formatDiagnostics(diags));
+  if (diags.some((d) => d.category === 1 /* ts.DiagnosticCategory.Error */)) process.exit(1);
+}
 const result = program.emit();
 if (result.emitSkipped) {
   console.error('emit skipped');
