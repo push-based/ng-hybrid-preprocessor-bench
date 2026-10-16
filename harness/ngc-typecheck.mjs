@@ -29,7 +29,14 @@ if (positionals.length !== 1) {
 }
 
 const tsconfig = path.resolve(positionals[0]);
-const overrides = {noEmit: true, ...(args.root ? {rootDir: path.resolve(args.root)} : {})};
+// noUnusedLocals/noUnusedParameters are off because ngp's generated code fails them (TS6133), and
+// the ngp candidates check with them off; both sides do the same work.
+const overrides = {
+  noEmit: true,
+  noUnusedLocals: false,
+  noUnusedParameters: false,
+  ...(args.root ? {rootDir: path.resolve(args.root)} : {}),
+};
 // ngc only accepts extendedDiagnostics with strictTemplates on (NG4003).
 if (readConfiguration(tsconfig).options.strictTemplates) {
   overrides.extendedDiagnostics = {defaultCategory: 'suppress'};

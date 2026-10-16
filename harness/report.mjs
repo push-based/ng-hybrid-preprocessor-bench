@@ -122,8 +122,9 @@ function renderPair(section) {
         continue;
       }
       const ratio = b.hyperfine ? `**${(b.hyperfine.medianMs / c.hyperfine.medianMs).toFixed(2)}×**` : '–';
-      const known = c.gate?.knownTsgoErrors;
-      if (known) c.label += ` ¹`;
+      const tc = c.gate?.typeCheck;
+      const differs = tc && Object.entries(tc).some(([k, v]) => k !== 'ngcErrors' && !v.matchesNgc);
+      if (differs) c.label += ' ¹';
       out(
         `| | ${c.label} | ${sec(c.hyperfine.medianMs)}${noisy(c.hyperfine)} | ${sec(c.hyperfine.p95Ms)} | ${ratio} | ` +
           `${sec(c.hyperfine.cpuMs)} (${c.hyperfine.parallelism.toFixed(1)}) | ${mb(med(c.phaseRuns, (p) => p.rss))} |`,
@@ -132,14 +133,31 @@ function renderPair(section) {
   }
   out();
   out('"vs baseline" is the baseline median divided by the candidate median: above 1× means ngp\'s pipeline is faster.');
+  // Diagnostics: S3/S4 compare every type error, mapped back to the app, with ngc's.
+  const notes = [];
   for (const r of results) {
-    const known = r.candidates.find((c) => c.gate?.knownTsgoErrors)?.gate.knownTsgoErrors;
-    if (known) {
-      out(
-        `\n¹ ${r.target.label} doesn't type-check under TypeScript 7 on its own sources: \`tsgo\` reports ${known.length} error${known.length === 1 ? '' : 's'} ` +
-          `(${[...new Set(known)].join(', ')}) before ngp is involved. ngp's output passed because \`tsgo\` reported exactly those errors and no others.`,
-      );
+    for (const c of r.candidates) {
+      const tc = c.gate?.typeCheck;
+      if (!tc) continue;
+      for (const [step, v] of Object.entries(tc)) {
+        if (step === 'ngcErrors' || v.matchesNgc) continue;
+        const parts = [];
+        if (v.extra.length) parts.push(`${v.extra.length} error${v.extra.length === 1 ? '' : 's'} ngc doesn't report: ${v.extra.slice(0, 4).map((e) => `\`${e}\``).join(', ')}`);
+        if (v.extraAlsoOnOriginalSourcesUnderTs7.length) {
+          parts.push(
+            `${v.extraAlsoOnOriginalSourcesUnderTs7.length} TypeScript 7 error${v.extraAlsoOnOriginalSourcesUnderTs7.length === 1 ? '' : 's'} that \`tsgo\` also reports on the app's own sources, before ngp is involved: ${v.extraAlsoOnOriginalSourcesUnderTs7.slice(0, 4).map((e) => `\`${e}\``).join(', ')}`,
+          );
+        }
+        if (v.missing.length) parts.push(`${v.missing.length} error${v.missing.length === 1 ? '' : 's'} ngc reports that it doesn't: ${v.missing.slice(0, 4).map((e) => `\`${e}\``).join(', ')}`);
+        notes.push(`${r.target.label} (ngc: ${tc.ngcErrors} errors), ${c.label.replace(' ¹', '')}: ${parts.join('; ')}.`);
+      }
     }
+  }
+  if (notes.length) {
+    out();
+    out('¹ Type errors differ from ngc\'s. Errors are compared after mapping type-check-block positions back to templates. The run still finished and is timed:');
+    out();
+    for (const n of notes) out(`- ${n}`);
   }
 
   // ngp phases, one table per scenario.

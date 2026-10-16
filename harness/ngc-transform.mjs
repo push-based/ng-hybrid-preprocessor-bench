@@ -63,12 +63,14 @@ if (args.diagnostics) {
     ...program.getNgStructuralDiagnostics(),
     ...program.getNgSemanticDiagnostics(),
   ];
-  if (diags.length > 0) {
-    for (const d of diags.slice(0, 5)) {
+  // Only errors fail the gate; warnings such as NG8113 (unused standalone import) are printed.
+  const errors = diags.filter((d) => d.category === 1 /* ts.DiagnosticCategory.Error */);
+  if (errors.length > 0) {
+    for (const d of errors.slice(0, 5)) {
       const text = typeof d.messageText === 'string' ? d.messageText : d.messageText.messageText;
       console.error(`${d.file?.fileName ?? ''}: error ${d.source === 'angular' ? 'NG' : 'TS'}${d.code}: ${text}`);
     }
-    console.error(`${diags.length} diagnostics`);
+    console.error(`${errors.length} errors`);
     process.exit(1);
   }
 }

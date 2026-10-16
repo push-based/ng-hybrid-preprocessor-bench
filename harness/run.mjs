@@ -38,6 +38,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {parseArgs} from 'node:util';
 import {verifyCorpus} from './lib/corpus.mjs';
+import {mapTcbDiagnostic, parseDiagnostics} from './lib/diagnostics.mjs';
 import {captureEnvironment} from './lib/environment.mjs';
 import {engineEnv, hyperfineBin, ngpMain, root, tscBin, tsgoBin} from './lib/paths.mjs';
 import {summarize} from './lib/stats.mjs';
@@ -249,22 +250,47 @@ async function resolveTarget(item) {
 }
 
 /**
- * Error codes `tsgo` (TypeScript 7) reports on a real app's own, uncompiled sources: TypeScript-only
+ * Comparable keys for type errors. An error in a template (.html) keeps its line and column; an
+ * error in a .ts file keeps only file and code, because ngp's output shifts lines (decorators are
+ * replaced by compiled definitions) and inline-template positions can't be told apart from code.
+ * Paths are relative to the app, with ngp's output dir mapped back onto it.
+ */
+function errorKeys(output, t, ngpOut) {
+  const toApp = (f) => (ngpOut && f.startsWith(ngpOut + path.sep) ? path.join(t.workspace, path.relative(ngpOut, f)) : f);
+  return parseDiagnostics(output, ngpOut ? [root, ngpOut] : [t.workspace, root])
+    .map((d) => mapTcbDiagnostic(d) ?? d)
+    .map((d) => {
+      const file = path.relative(t.workspace, toApp(d.file));
+      return file.endsWith('.html') ? `${file}:${d.line}:${d.col} ${d.code}` : `${file} ${d.code}`;
+    })
+    .sort();
+}
+
+/**
+ * Errors `tsgo` (TypeScript 7) reports on a real app's own, uncompiled sources: TypeScript-only
  * errors the app would hit migrating to TS 7, before ngp is involved. Computed once per app.
  */
-const knownTsgoErrors = new Map();
+const ts7OriginalErrors = new Map();
 function tsgoErrorsOnOriginal(t) {
-  if (!knownTsgoErrors.has(t.name)) {
+  if (!ts7OriginalErrors.has(t.name)) {
     const r = spawnSync(node, [tsgoBin, '-p', t.tsconfigApp, '--noEmit', '--rootDir', t.workspace], {
       cwd: root,
       encoding: 'utf8',
       maxBuffer: 256 * 1024 * 1024,
     });
-    knownTsgoErrors.set(t.name, errorCodes(r.stdout + r.stderr));
+    ts7OriginalErrors.set(t.name, errorKeys(r.stdout + r.stderr, t, null));
   }
-  return knownTsgoErrors.get(t.name);
+  return ts7OriginalErrors.get(t.name);
 }
-const errorCodes = (output) => (output.match(/error TS\d+/g) ?? []).map((m) => m.slice(6)).sort();
+const minus = (a, b) => {
+  const rest = [...b];
+  return a.filter((x) => {
+    const i = rest.indexOf(x);
+    if (i < 0) return true;
+    rest.splice(i, 1);
+    return false;
+  });
+};
 
 /** The app's `paths` aliases with absolute targets, or null if it has none. */
 function resolvedPaths(tsconfig) {
@@ -323,7 +349,9 @@ function baselineSpec(kind, t, out, sourceTs) {
     case 'ng-build-dev':
       return {
         label: 'ng build (development)',
-        args: [t.ngBin, 'build', '--configuration', 'development', '--output-path', out, '--no-progress'],
+        // --aot: an app's development configuration may be a JIT build (Super Productivity's is),
+        // which skips the AOT compilation and template type-check this repo is about.
+        args: [t.ngBin, 'build', '--configuration', 'development', '--aot', '--output-path', out, '--no-progress'],
         gateArgs: [],
         cwd: t.workspace,
         env: {NG_CLI_ANALYTICS: 'false'},
@@ -386,12 +414,18 @@ async function runPair(scenarioId, scenario, t) {
           compilerOptions: {
             noEmit: true,
             types: [],
+            // ngp's generated code (template functions' unused `ctx`, never-called _tcbN
+            // functions) fails these checks (TS6133). The ngc baseline turns them off too, so both
+            // type-checks do the same work; see harness/ngc-typecheck.mjs.
+            noUnusedLocals: false,
+            noUnusedParameters: false,
             rootDir: '/',
             rootDirs: [c.paths.ngpOut, t.workspace],
             paths: remappedPaths(t, c.paths.ngpOut),
           },
           files: [],
-          include: [`${path.relative(out, c.paths.ngpOut)}/src/**/*.ts`],
+          // Everything ngp wrote, not just src/: Nx apps keep their code under apps/ and libs/.
+          include: [`${path.relative(out, c.paths.ngpOut)}/**/*.ts`],
         }),
       );
     }
@@ -422,6 +456,8 @@ async function runPair(scenarioId, scenario, t) {
   let basePass = gb.exit === 0 && (await baseline.check());
   if (basePass && scenario.boot) basePass = boot(baseline.bootDir, t).pass;
   result.baseline.gate = {exit: gb.exit, pass: basePass};
+  // ngc's own type errors, for the S3/S4 diagnostics comparison.
+  const baselineErrors = scenario.baseline === 'ngc-typecheck' ? errorKeys(gb.output, t, null) : [];
   if (!basePass) result.baseline.gate.tail = tail(gb.output);
 
   for (const [i, c] of candidates.entries()) {
@@ -439,14 +475,36 @@ async function runPair(scenarioId, scenario, t) {
     const tcbs = await countFiles(c.paths.ngpOut, (n) => n.endsWith('.ngtypecheck.ts'));
     const loaded = c.engine === 'sidecar' ? 'sidecar' : g.output.match(/loaded (native|wasm) from/)?.[1] ?? null;
     const steps = c.stepArgs.map((s) => ({name: s.name, ...timed(s.args)}));
-    // A real app may not type-check under TypeScript 7 at all. Then tsgo on ngp's output passes
-    // only if it reports exactly the errors tsgo reports on the app's own sources: ngp added none.
+    // A clean type-check proves nothing if the checker never loaded ngp's files. Count how many of
+    // them its program contains (TypeScript 6's --listFilesOnly; tsgo reads the same config).
+    let checkedFiles = null;
+    if (c.steps.some((s) => s === 'tsc' || s === 'tsgo')) {
+      const l = spawnSync(node, [tscBin, '-p', c.paths.checkConfig, '--listFilesOnly'], {
+        cwd: root,
+        encoding: 'utf8',
+        maxBuffer: 256 * 1024 * 1024,
+      });
+      checkedFiles = l.stdout.split('\n').filter((f) => f.startsWith(c.paths.ngpOut + path.sep)).length;
+    }
+    // Type-check steps: compare their errors, mapped back to the app, with ngc's. Generated apps
+    // must be clean on both sides. On a real app a difference is a result, not a broken run: the
+    // step passes the gate if the checker loaded ngp's files and finished with diagnostics.
+    const typeCheck = {};
     for (const s of steps) {
-      if (s.name !== 'tsgo' || s.exit === 0 || t.kind !== 'real') continue;
-      const known = tsgoErrorsOnOriginal(t);
-      if (known.length > 0 && JSON.stringify(errorCodes(s.output)) === JSON.stringify(known)) {
+      if (s.name !== 'tsc' && s.name !== 'tsgo') continue;
+      const errors = errorKeys(s.output, t, c.paths.ngpOut);
+      const extra = minus(errors, baselineErrors);
+      const ts7 = s.name === 'tsgo' && extra.length && t.kind === 'real' ? tsgoErrorsOnOriginal(t) : [];
+      typeCheck[s.name] = {
+        errors: errors.length,
+        matchesNgc: extra.length === 0 && minus(baselineErrors, errors).length === 0,
+        extra: minus(extra, ts7),
+        extraAlsoOnOriginalSourcesUnderTs7: extra.filter((e) => ts7.includes(e)),
+        missing: minus(baselineErrors, errors),
+      };
+      if (s.exit !== 0 && t.kind === 'real' && errors.length > 0) {
+        s.finishedWithErrors = true;
         s.exit = 0;
-        s.knownErrors = known;
       }
     }
     const js = c.steps.includes('esbuild')
@@ -464,6 +522,7 @@ async function runPair(scenarioId, scenario, t) {
       g.exit === 0 &&
       diagnostics === 0 &&
       countsOk &&
+      (checkedFiles === null || checkedFiles >= emitted) &&
       loaded === c.engine &&
       steps.every((s) => s.exit === 0);
     let booted = null;
@@ -478,7 +537,9 @@ async function runPair(scenarioId, scenario, t) {
       ngtypecheck: tcbs,
       engineLoaded: loaded,
       steps: Object.fromEntries(steps.map((s) => [s.name, s.exit])),
-      knownTsgoErrors: steps.find((s) => s.knownErrors)?.knownErrors ?? null,
+      typeCheck: Object.keys(typeCheck).length ? {ngcErrors: baselineErrors.length, ...typeCheck} : null,
+      finishedWithErrors: steps.filter((s) => s.finishedWithErrors).map((s) => s.name),
+      checkedFiles,
       js,
       boot: booted?.pass ?? null,
       pass,
@@ -505,12 +566,13 @@ async function runPair(scenarioId, scenario, t) {
       `${baseline.cwd ? `cd ${q(baseline.cwd)} && ` : ''}${envPrefix(baseline.env ?? {})}${[node, ...baseline.args].map(q).join(' ')}`,
     );
     for (const c of passing) {
-      // A tsgo step that passed the gate with known app errors exits 1; let hyperfine time it.
-      const tolerated = result.candidates.find((r) => r.id === c.id).gate.knownTsgoErrors;
+      // A type-check that passed the gate while reporting errors exits non-zero; let hyperfine time it.
+      const tolerated = result.candidates.find((r) => r.id === c.id).gate.finishedWithErrors;
       const chain = [
         `${envPrefix(c.env)}${[node, ...c.ngpArgs].map(q).join(' ')} >/dev/null`,
         ...c.stepArgs.map(
-          (s) => `${[node, ...s.args].map(q).join(' ')} >/dev/null${s.name === 'tsgo' && tolerated ? ' || [ $? -eq 1 ]' : ''}`,
+          (s) =>
+            `${[node, ...s.args].map(q).join(' ')} >/dev/null${tolerated.includes(s.name) ? ' || { e=$?; [ $e -le 2 ]; }' : ''}`,
         ),
       ].join(' && ');
       hfArgs.push('--prepare', rm([c.dir]), '--command-name', c.label, chain);
@@ -579,7 +641,7 @@ async function runReference(scenarioId, scenario, t) {
   const out = path.join(benchOut, `${scenarioId}-${t.name}`);
   const configs = ['development', 'production'];
   const buildArgs = (config) => [
-    t.ngBin, 'build', '--configuration', config, '--output-path', path.join(out, config), '--no-progress',
+    t.ngBin, 'build', '--configuration', config, '--aot', '--output-path', path.join(out, config), '--no-progress',
   ];
   const ngEnv = {NG_CLI_ANALYTICS: 'false'};
   const cacheDir = path.join(t.workspace, '.angular');
