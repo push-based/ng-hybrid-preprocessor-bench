@@ -7,6 +7,8 @@ export const enginesDir = path.join(root, 'toolchain/out/engines');
 export const ngpMain = path.join(root, 'toolchain/out/preprocessor/main.js');
 export const ngcBin = path.join(root, 'node_modules/@angular/compiler-cli/bundles/src/bin/ngc.js');
 export const tscBin = path.join(root, 'node_modules/typescript/bin/tsc');
+// TypeScript 7, the Go port, installed under an alias because Angular needs typescript@6 by name.
+export const tsgoBin = path.join(root, 'node_modules/typescript7/bin/tsc');
 export const hyperfineBin = path.join(root, 'toolchain/.cache/tools/bin/hyperfine');
 
 /** Environment variables and extra ngp arguments that force one analyzer engine, with no fallback. */

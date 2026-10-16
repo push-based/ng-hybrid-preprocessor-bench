@@ -1,7 +1,8 @@
 // Checks that ngc and ngp both compile a generated workspace cleanly.
 //
 //   ngc   `ngc -p tsconfig.app.json`: analysis, template type-checking and JS emit in one go.
-//   ngp   `ngp --optimize`, then `tsc --noEmit` over its .ts and .ngtypecheck.ts output.
+//   ngp   `ngp --optimize`, then `tsc --noEmit` (TypeScript 6) and `tsgo --noEmit` (TypeScript 7)
+//         over its .ts and .ngtypecheck.ts output.
 //         ngp itself must exit 0, report no diagnostics in its .ngdiag.json, and write one
 //         output file per input .ts file.
 //
@@ -17,7 +18,8 @@ import {spawnSync} from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {parseArgs} from 'node:util';
-import {engineEnv, ngcBin, ngpMain, root, tscBin} from '../harness/lib/paths.mjs';
+import {diagnosticKey, mapTcbDiagnostic, parseDiagnostics} from '../harness/lib/diagnostics.mjs';
+import {engineEnv, ngcBin, ngpMain, root, tscBin, tsgoBin} from '../harness/lib/paths.mjs';
 
 
 const {values: args, positionals} = parseArgs({
@@ -63,8 +65,9 @@ function run(cmd, cmdArgs, env = {}) {
   // ngc colors its diagnostics; strip ANSI codes so they can be counted.
   const output = ((res.stdout ?? '') + (res.stderr ?? '')).replace(/\x1b\[[0-9;]*m/g, '');
   // ngc and tsc print one "error TSxxxx"/"error NGxxxx" per diagnostic.
+  const codes = [...new Set(output.match(/error (TS|NG)\d+/g)?.map((m) => m.slice(6)) ?? [])].sort();
   const errors = output.match(/error (TS|NG)\d+/g)?.length ?? 0;
-  return {exit: res.status, ms: Math.round(ms), errors, output};
+  return {exit: res.status, ms: Math.round(ms), errors, codes, output};
 }
 
 async function listFiles(dir, pred) {
@@ -92,7 +95,10 @@ const report = {workspace: manifest.name, negativeControl: negative, sourceTs, n
 // ngc
 {
   const r = run(ngcBin, ['-p', tsconfigApp, '--outDir', path.join(outRoot, 'ngc')]);
-  report.ngc = {pass: r.exit === 0, exit: r.exit, errors: r.errors, ms: r.ms};
+  report.ngc = {pass: r.exit === 0, exit: r.exit, errors: r.errors, codes: r.codes, ms: r.ms};
+  report.ngc.locations = parseDiagnostics(r.output, [workspace, root])
+    .map((d) => diagnosticKey(d, workspace))
+    .sort();
   if (r.exit !== 0) report.ngc.firstError = r.output.split('\n').find((l) => /error/.test(l));
 }
 
@@ -112,9 +118,11 @@ for (const engine of args.engine.split(',').map((e) => e.trim())) {
   const emitted = await listFiles(out, (n) => n.endsWith('.ts') && !n.endsWith('.ngtypecheck.ts')).catch(() => []);
   const tcbs = await listFiles(out, (n) => n.endsWith('.ngtypecheck.ts')).catch(() => []);
 
-  // Type-check what ngp wrote, using the workspace's own compiler options.
+  // Type-check what ngp wrote, using the workspace's own compiler options. The output may sit
+  // outside this repo, so link node_modules next to it for @angular/* to resolve.
   const checkConfig = path.join(out, 'tsconfig.check.json');
   await fs.mkdir(out, {recursive: true});
+  await fs.symlink(path.join(root, 'node_modules'), path.join(out, 'node_modules'), 'dir').catch(() => {});
   await fs.writeFile(
     checkConfig,
     JSON.stringify({
@@ -125,33 +133,66 @@ for (const engine of args.engine.split(',').map((e) => e.trim())) {
     }),
   );
   const tsc = run(tscBin, ['-p', checkConfig]);
+  const tsgo = run(tsgoBin, ['-p', checkConfig]);
 
   const ngpOk = ngp.exit === 0 && diagnostics !== null && diagnostics.length === 0;
+  // Errors land in .ngtypecheck.ts files; map each back to the template location ngc reports.
+  const locations = (r) =>
+    parseDiagnostics(r.output, [root, out])
+      .map((d) => mapTcbDiagnostic(d) ?? d)
+      .map((d) => diagnosticKey(d, workspace))
+      .sort();
+  const checker = (r) => {
+    const locs = locations(r);
+    return {
+      exit: r.exit,
+      errors: r.errors,
+      codes: r.codes,
+      ms: r.ms,
+      locations: locs,
+      locationsMatchNgc: JSON.stringify(locs) === JSON.stringify(report.ngc.locations),
+    };
+  };
   const result = {
-    pass: ngpOk && emitted.length === sourceTs && tsc.exit === 0,
+    pass: ngpOk && emitted.length === sourceTs && tsc.exit === 0 && tsgo.exit === 0,
+    // Negative control: ngp still compiles, and BOTH type-checkers reject the planted error.
+    caught: ngpOk && emitted.length === sourceTs && tsc.exit !== 0 && tsgo.exit !== 0,
     ngp: {exit: ngp.exit, ms: ngp.ms, diagnostics: diagnostics?.length ?? null},
     outputs: {ts: emitted.length, ngtypecheck: tcbs.length},
-    tsc: {exit: tsc.exit, errors: tsc.errors, ms: tsc.ms},
+    tsc: checker(tsc),
+    tsgo: checker(tsgo),
   };
   if (ngp.exit !== 0) result.ngp.tail = ngp.output.trim().split('\n').slice(-5);
-  if (tsc.exit !== 0) result.tsc.firstError = tsc.output.split('\n').find((l) => /error/.test(l));
+  for (const [k, r] of [['tsc', tsc], ['tsgo', tsgo]]) {
+    if (r.exit !== 0) result[k].firstError = r.output.split('\n').find((l) => /error/.test(l));
+  }
   report.ngp[engine] = result;
 }
 
 // Report
-const verdict = (ok) => (negative ? (ok ? 'NOT CAUGHT' : 'caught') : ok ? 'pass' : 'FAIL');
+const verdict = (r) =>
+  negative ? (r.caught ? 'caught' : 'NOT CAUGHT') : r.pass ? 'pass' : 'FAIL';
+const ngcCaught = !report.ngc.pass;
 console.log(`\n${label}: ${manifest.components} components, ${sourceTs} .ts files`);
 console.log(
-  `  ngc            ${verdict(report.ngc.pass).padEnd(10)} ${report.ngc.errors} errors   ${report.ngc.ms} ms`,
+  `  ngc            ${(negative ? (ngcCaught ? 'caught' : 'NOT CAUGHT') : report.ngc.pass ? 'pass' : 'FAIL').padEnd(10)} ` +
+    `${report.ngc.errors} errors ${report.ngc.codes.join(',')}   ${report.ngc.ms} ms`,
 );
 for (const [engine, r] of Object.entries(report.ngp)) {
   console.log(
-    `  ngp ${engine.padEnd(8)}   ${verdict(r.pass).padEnd(10)} ngp ${r.ngp.ms} ms (exit ${r.ngp.exit}, ` +
+    `  ngp ${engine.padEnd(8)}   ${verdict(r).padEnd(10)} ngp ${r.ngp.ms} ms (exit ${r.ngp.exit}, ` +
       `${r.ngp.diagnostics ?? '?'} diagnostics, ${r.outputs.ts}/${sourceTs} files, ${r.outputs.ngtypecheck} TCBs)` +
-      ` + tsc ${r.tsc.ms} ms (${r.tsc.errors} errors)`,
+      ` + tsc ${r.tsc.ms} ms (${r.tsc.errors} errors ${r.tsc.codes.join(',')})` +
+      ` + tsgo ${r.tsgo.ms} ms (${r.tsgo.errors} errors ${r.tsgo.codes.join(',')})` +
+      (negative
+        ? `; locations match ngc: tsc ${r.tsc.locationsMatchNgc ? 'yes' : 'NO'}, tsgo ${r.tsgo.locationsMatchNgc ? 'yes' : 'NO'}`
+        : ''),
   );
 }
-for (const line of [report.ngc.firstError, ...Object.values(report.ngp).map((r) => r.tsc.firstError)]) {
+for (const line of [
+  report.ngc.firstError,
+  ...Object.values(report.ngp).flatMap((r) => [r.tsc.firstError, r.tsgo.firstError]),
+]) {
   if (line) console.log(`    ${line.trim()}`);
 }
 
@@ -162,5 +203,9 @@ all[label] = {date: new Date().toISOString(), node: process.version, ...report};
 await fs.writeFile(resultsFile, JSON.stringify(all, null, 2) + '\n');
 
 const allPass = report.ngc.pass && Object.values(report.ngp).every((r) => r.pass);
-const noneFail = !report.ngc.pass && Object.values(report.ngp).every((r) => !r.pass);
-process.exitCode = (negative ? noneFail : allPass) ? 0 : 1;
+// In the negative control, ngp's errors must also point at the same template location as ngc's.
+const allCaught =
+  ngcCaught &&
+  Object.values(report.ngp).every((r) => r.caught && r.tsc.locationsMatchNgc && r.tsgo.locationsMatchNgc);
+if (negative) console.log(`  ngc location: ${report.ngc.locations.join('; ')}`);
+process.exitCode = (negative ? allCaught : allPass) ? 0 : 1;
