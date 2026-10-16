@@ -42,7 +42,7 @@ ngc type-checks templates inside its own TypeScript 6 program. ngp writes the ty
 | Super Productivity | 252 | 20.1 s | 30.7 s | **0.66×** | 16.7 s ⚠ | **1.21×** | 1,645 / 1,388 MB |
 | Ghostfolio | 157 | 11.3 s | 13.1 s ⚠ | **0.86×** | 8.63 s ⚠ | **1.31×** | 1,250 / 561 MB |
 
-⚠ These results were noisy: run to run they varied by 7–12%, Ghostfolio's `tsgo` pipeline anywhere from 6.9 s to 13.9 s, while ngc on the same runner stayed within 3%. An earlier 3-run sample ([run 38874189074](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38874189074)) measured ngp + `tsgo` at 1.85× on Super Productivity and 2.06× on Ghostfolio. Read the real apps' TypeScript 7 ratio as somewhere between 1.2× and 2× until a quieter rerun narrows it.
+⚠ These results were noisy: run to run they varied by 7–12%, Ghostfolio's `tsgo` pipeline anywhere from 6.9 s to 13.9 s, while ngc on the same runner stayed within 3%. An earlier 3-run sample ([run 38874189074](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38874189074)) measured ngp + `tsgo` at 1.85× on Super Productivity and 2.06× on Ghostfolio. Read the real apps' TypeScript 7 ratio as somewhere between 1.2× and 2× until a quieter rerun narrows it; that rerun is [run 38899025048](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38899025048), in progress.
 
 TypeScript 7 roughly halves the type-check of ngp's output compared with TypeScript 6. That's enough for ngp to beat ngc on small apps, not on large ones: at 5,000 components, `tsgo` alone takes 18.6 s and ngp's pipeline peaks at 4.9 GB, against ngc's 2.3 GB. ngc builds its type-check blocks in memory and checks them in the program it already has; ngp's route means a second, separate program over twice as many files, 5,429 outputs plus 5,429 type-check blocks. `tsgo` is multithreaded and these runners have 2 cores, so more cores should help it, and this repo hasn't measured that yet.
 
@@ -94,6 +94,12 @@ A development build that has to boot in headless Chrome. `ng build --configurati
 | 5,000 | 76.4 s | 30.8 s | **2.48×** | 52.9 s | **1.44×** |
 
 Every build booted, rendered its routes and logged no errors.
+
+### The ViteConf 2026 comparison (S8, in progress)
+
+At ViteConf 2026, Alex Rickabaugh reported about 13 s down to 4.5 s, "almost three times faster", for the whole compiler job: old ngc against ngp followed by TypeScript 7 ([talk notes](docs/research.md#what-the-angular-team-said-at-viteconf-2026)). He named neither the app nor the machine. S8 reproduces that job: ngc's full compile, every diagnostic and then emit, against `ngp --optimize` followed by one `tsgo` 7 run (and, for contrast, one `tsc` 6 run) that type-checks ngp's output and emits JavaScript. Its type errors are compared with ngc's as in S3.
+
+S8's first CI run is [run 38899025048](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38899025048), together with the S3/S4 rerun. A local sanity run on Ghostfolio, not a CI result, gave 6.6 s for ngc against 2.3 s for ngp plus `tsgo`, 2.9×, and 6.2 s for ngp plus `tsc` 6, so nearly all of that gain comes from TypeScript 7. Given S4, expect the generated apps to tell a different story at 5,000 components.
 
 ### A full `ng build`, for context (R)
 
