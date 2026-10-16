@@ -32,7 +32,7 @@
 // directory), never into the project: IDEs and Spotlight react to thousands of new files there.
 
 import {execFileSync, spawnSync} from 'node:child_process';
-import {readFileSync, rmSync} from 'node:fs';
+import {existsSync, readFileSync, rmSync} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -41,6 +41,7 @@ import {verifyCorpus} from './lib/corpus.mjs';
 import {captureEnvironment} from './lib/environment.mjs';
 import {engineEnv, hyperfineBin, ngpMain, root, tscBin, tsgoBin} from './lib/paths.mjs';
 import {summarize} from './lib/stats.mjs';
+import ts from 'typescript';
 
 const {values: args} = parseArgs({
   options: {
@@ -221,6 +222,9 @@ async function resolveTarget(item) {
       manifest,
       tsconfigApp: path.join(workspace, 'tsconfig.app.json'),
       tsconfigRoot: path.join(workspace, 'tsconfig.json'),
+      ngpTarget: workspace,
+      ngBin,
+      paths: null,
     };
   }
   const real = item.match(/^real:(.+)$/)?.[1];
@@ -237,14 +241,64 @@ async function resolveTarget(item) {
     manifest,
     tsconfigApp: path.join(workspace, manifest.tsconfigApp),
     tsconfigRoot: path.join(workspace, manifest.tsconfigRoot ?? manifest.tsconfigApp),
+    ngpTarget: path.join(workspace, manifest.ngpTarget ?? manifest.tsconfigApp),
+    // A real app builds with its own CLI install.
+    ngBin: path.join(workspace, 'node_modules/@angular/cli/bin/ng.js'),
+    paths: resolvedPaths(path.join(workspace, manifest.tsconfigApp)),
   };
+}
+
+/**
+ * Error codes `tsgo` (TypeScript 7) reports on a real app's own, uncompiled sources: TypeScript-only
+ * errors the app would hit migrating to TS 7, before ngp is involved. Computed once per app.
+ */
+const knownTsgoErrors = new Map();
+function tsgoErrorsOnOriginal(t) {
+  if (!knownTsgoErrors.has(t.name)) {
+    const r = spawnSync(node, [tsgoBin, '-p', t.tsconfigApp, '--noEmit', '--rootDir', t.workspace], {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 256 * 1024 * 1024,
+    });
+    knownTsgoErrors.set(t.name, errorCodes(r.stdout + r.stderr));
+  }
+  return knownTsgoErrors.get(t.name);
+}
+const errorCodes = (output) => (output.match(/error TS\d+/g) ?? []).map((m) => m.slice(6)).sort();
+
+/** The app's `paths` aliases with absolute targets, or null if it has none. */
+function resolvedPaths(tsconfig) {
+  const parsed = ts.getParsedCommandLineOfConfigFile(tsconfig, {}, {...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {}});
+  const {paths, pathsBasePath} = parsed?.options ?? {};
+  if (!paths) return null;
+  return Object.fromEntries(
+    Object.entries(paths).map(([k, targets]) => [k, targets.map((x) => path.resolve(pathsBasePath, x))]),
+  );
+}
+
+/**
+ * The app's aliases, pointed at ngp's output first. An alias like `src/*` -> `./src/*` would
+ * otherwise make TypeScript type-check the original, uncompiled sources instead of ngp's output.
+ * The original stays as a fallback for files ngp doesn't emit, such as plain TypeScript libraries.
+ */
+function remappedPaths(t, ngpOut) {
+  if (!t.paths) return undefined;
+  return Object.fromEntries(
+    Object.entries(t.paths).map(([k, targets]) => [
+      k,
+      targets.flatMap((abs) => {
+        const rel = path.relative(t.workspace, abs);
+        return rel.startsWith('..') || rel.includes('node_modules') ? [abs] : [path.join(ngpOut, rel), abs];
+      }),
+    ]),
+  );
 }
 
 /** The baseline pipeline of a scenario: command, gate check and phase source. */
 function baselineSpec(kind, t, out, sourceTs) {
   const transform = (mode) => ({
     label: `ngc (${mode === 'local' ? 'experimental-local' : 'full'} mode)`,
-    args: ['harness/ngc-transform.mjs', t.tsconfigApp, '--mode', mode, '--out', out],
+    args: ['harness/ngc-transform.mjs', t.tsconfigApp, '--mode', mode, '--out', out, '--root', t.workspace],
     gateArgs: ['--diagnostics'],
     traceArgs: (f) => ['--trace', f],
     // One .js per source file for generated apps; real apps may emit files outside src/.
@@ -261,7 +315,7 @@ function baselineSpec(kind, t, out, sourceTs) {
     case 'ngc-typecheck':
       return {
         label: 'ngc type-check',
-        args: ['harness/ngc-typecheck.mjs', t.tsconfigApp],
+        args: ['harness/ngc-typecheck.mjs', t.tsconfigApp, '--root', t.workspace],
         gateArgs: [],
         traceArgs: (f) => ['--trace', f],
         check: async () => true,
@@ -269,7 +323,7 @@ function baselineSpec(kind, t, out, sourceTs) {
     case 'ng-build-dev':
       return {
         label: 'ng build (development)',
-        args: [ngBin, 'build', '--configuration', 'development', '--output-path', out, '--no-progress'],
+        args: [t.ngBin, 'build', '--configuration', 'development', '--output-path', out, '--no-progress'],
         gateArgs: [],
         cwd: t.workspace,
         env: {NG_CLI_ANALYTICS: 'false'},
@@ -286,7 +340,8 @@ function baselineSpec(kind, t, out, sourceTs) {
 
 async function runPair(scenarioId, scenario, t) {
   const out = path.join(benchOut, `${scenarioId}-${t.name}`);
-  const diagFile = path.join(t.workspace, path.basename(t.tsconfigApp).replace(/\.json$/, '.ngdiag.json'));
+  // ngp writes its diagnostics next to the tsconfig it compiled.
+  const diagFile = t.tsconfigApp.replace(/\.json$/, '.ngdiag.json');
   const sourceTs = await countSourceTs(t);
   const baseline = baselineSpec(scenario.baseline, t, path.join(out, 'baseline'), sourceTs);
 
@@ -305,7 +360,7 @@ async function runPair(scenarioId, scenario, t) {
       env: eEnv,
       dir,
       paths: p,
-      ngpArgs: [ngpMain, t.workspace, ...c.ngpArgs, '--out', p.ngpOut, ...extraArgs],
+      ngpArgs: [ngpMain, t.ngpTarget, ...c.ngpArgs, '--out', p.ngpOut, '--root', t.workspace, ...extraArgs],
       stepArgs: c.steps.map((s) => ({name: s, args: STEPS[s](t, p)})),
     };
   });
@@ -314,13 +369,27 @@ async function runPair(scenarioId, scenario, t) {
   // tsgo, and write each candidate's type-check config, which extends the app's own tsconfig.
   const setupOut = async () => {
     await fs.mkdir(out, {recursive: true});
-    await fs.symlink(path.join(root, 'node_modules'), path.join(out, 'node_modules'), 'dir').catch(() => {});
+    // Real apps resolve packages from their own install; generated apps from this repo's.
+    const modules = t.kind === 'real' ? path.join(t.workspace, 'node_modules') : path.join(root, 'node_modules');
+    await fs.symlink(modules, path.join(out, 'node_modules'), 'dir').catch(() => {});
     for (const c of candidates) {
       await fs.writeFile(
         c.paths.checkConfig,
         JSON.stringify({
           extends: t.tsconfigRoot,
-          compilerOptions: {noEmit: true, types: [], rootDir: '.'},
+          // rootDir only gates which files may be part of the program here (nothing is emitted).
+          // Path-alias fallbacks can resolve to the app's own non-Angular sources outside the
+          // output dir, so it has to contain everything.
+          // rootDirs merges ngp's output with the app folder for relative imports, output first:
+          // files ngp doesn't emit (JSON, hand-written .d.ts) resolve from the app, as they would
+          // in a build that compiled in memory.
+          compilerOptions: {
+            noEmit: true,
+            types: [],
+            rootDir: '/',
+            rootDirs: [c.paths.ngpOut, t.workspace],
+            paths: remappedPaths(t, c.paths.ngpOut),
+          },
           files: [],
           include: [`${path.relative(out, c.paths.ngpOut)}/src/**/*.ts`],
         }),
@@ -362,22 +431,41 @@ async function runPair(scenarioId, scenario, t) {
       .readFile(diagFile, 'utf8')
       .then((x) => JSON.parse(x).diagnostics.length)
       .catch(() => null);
-    const emitted = await countFiles(c.paths.ngpOut, (n) => n.endsWith('.ts') && !n.endsWith('.ngtypecheck.ts'));
+    // ngp also copies hand-written .d.ts files through; those aren't outputs to count.
+    const emitted = await countFiles(
+      c.paths.ngpOut,
+      (n) => n.endsWith('.ts') && !n.endsWith('.ngtypecheck.ts') && !n.endsWith('.d.ts'),
+    );
     const tcbs = await countFiles(c.paths.ngpOut, (n) => n.endsWith('.ngtypecheck.ts'));
     const loaded = c.engine === 'sidecar' ? 'sidecar' : g.output.match(/loaded (native|wasm) from/)?.[1] ?? null;
     const steps = c.stepArgs.map((s) => ({name: s.name, ...timed(s.args)}));
+    // A real app may not type-check under TypeScript 7 at all. Then tsgo on ngp's output passes
+    // only if it reports exactly the errors tsgo reports on the app's own sources: ngp added none.
+    for (const s of steps) {
+      if (s.name !== 'tsgo' || s.exit === 0 || t.kind !== 'real') continue;
+      const known = tsgoErrorsOnOriginal(t);
+      if (known.length > 0 && JSON.stringify(errorCodes(s.output)) === JSON.stringify(known)) {
+        s.exit = 0;
+        s.knownErrors = known;
+      }
+    }
     const js = c.steps.includes('esbuild')
       ? await countFiles(c.paths.ngpOut, (n) => n.endsWith('.js'))
       : null;
     const optimize = c.ngpArgs.includes('--optimize');
+    // Generated apps: exactly one output (and one type-check block) per source file. Real apps:
+    // ngp skips type-only modules, so its count can sit below TypeScript's; what must hold is that
+    // every follow-up step succeeds on what ngp wrote, including tsc/tsgo finding zero errors.
+    const countsOk =
+      t.kind === 'generated'
+        ? emitted === sourceTs && (!optimize || tcbs === sourceTs) && (js === null || js === sourceTs)
+        : emitted > 0 && (!optimize || tcbs > 0) && (js === null || js === emitted);
     let pass =
       g.exit === 0 &&
       diagnostics === 0 &&
-      emitted === sourceTs &&
-      (!optimize || tcbs === sourceTs) &&
+      countsOk &&
       loaded === c.engine &&
-      steps.every((s) => s.exit === 0) &&
-      (js === null || js === sourceTs);
+      steps.every((s) => s.exit === 0);
     let booted = null;
     if (pass && scenario.boot) {
       booted = boot(c.paths.distOut, t);
@@ -390,6 +478,7 @@ async function runPair(scenarioId, scenario, t) {
       ngtypecheck: tcbs,
       engineLoaded: loaded,
       steps: Object.fromEntries(steps.map((s) => [s.name, s.exit])),
+      knownTsgoErrors: steps.find((s) => s.knownErrors)?.knownErrors ?? null,
       js,
       boot: booted?.pass ?? null,
       pass,
@@ -416,9 +505,13 @@ async function runPair(scenarioId, scenario, t) {
       `${baseline.cwd ? `cd ${q(baseline.cwd)} && ` : ''}${envPrefix(baseline.env ?? {})}${[node, ...baseline.args].map(q).join(' ')}`,
     );
     for (const c of passing) {
+      // A tsgo step that passed the gate with known app errors exits 1; let hyperfine time it.
+      const tolerated = result.candidates.find((r) => r.id === c.id).gate.knownTsgoErrors;
       const chain = [
         `${envPrefix(c.env)}${[node, ...c.ngpArgs].map(q).join(' ')} >/dev/null`,
-        ...c.stepArgs.map((s) => `${[node, ...s.args].map(q).join(' ')} >/dev/null`),
+        ...c.stepArgs.map(
+          (s) => `${[node, ...s.args].map(q).join(' ')} >/dev/null${s.name === 'tsgo' && tolerated ? ' || [ $? -eq 1 ]' : ''}`,
+        ),
       ].join(' && ');
       hfArgs.push('--prepare', rm([c.dir]), '--command-name', c.label, chain);
     }
@@ -486,7 +579,7 @@ async function runReference(scenarioId, scenario, t) {
   const out = path.join(benchOut, `${scenarioId}-${t.name}`);
   const configs = ['development', 'production'];
   const buildArgs = (config) => [
-    ngBin, 'build', '--configuration', config, '--output-path', path.join(out, config), '--no-progress',
+    t.ngBin, 'build', '--configuration', config, '--output-path', path.join(out, config), '--no-progress',
   ];
   const ngEnv = {NG_CLI_ANALYTICS: 'false'};
   const cacheDir = path.join(t.workspace, '.angular');
@@ -579,6 +672,16 @@ for (const scenarioId of scenarios) {
   const scenario = SCENARIOS[scenarioId];
   for (const item of targets) {
     const t = await resolveTarget(item);
+    // S6 picks its edits from a generated app's layout, and S7's boot check looks for a generated
+    // app's markup; neither knows a real app's structure yet.
+    if (t.kind === 'real' && (scenario.incremental || scenario.boot)) {
+      console.log(`\n== ${scenarioId} ${t.name}: skipped, this scenario supports generated apps only`);
+      continue;
+    }
+    if (scenario.reference && !existsSync(path.join(t.workspace, 'angular.json'))) {
+      console.log(`\n== ${scenarioId} ${t.name}: skipped, not an Angular CLI workspace (no angular.json)`);
+      continue;
+    }
     if (scenario.reference) await runReference(scenarioId, scenario, t);
     else if (scenario.incremental) await runIncremental(scenarioId, scenario, t);
     else await runPair(scenarioId, scenario, t);

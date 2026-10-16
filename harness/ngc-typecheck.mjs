@@ -3,9 +3,16 @@
 // Creates the NgtscProgram, analyzes it, then collects every diagnostic: TypeScript syntax and
 // semantics, Angular structure, and template type-checking (which generates type-check blocks
 // inside ngc's own TypeScript program). This is the work `ngc -p tsconfig.json --noEmit` does.
-// Exits 1 and prints the diagnostics if there are any.
+// Exits 1 and prints the diagnostics if there are any errors; warnings are printed but pass.
 //
-// Usage: node harness/ngc-typecheck.mjs <tsconfig> [--trace <perf.json>]
+// Extended template diagnostics are suppressed when the app uses strictTemplates (ngc rejects the
+// option otherwise): ngp doesn't implement them yet (angular/angular#71316), and running them
+// would give ngc work the candidates skip.
+//
+// Usage: node harness/ngc-typecheck.mjs <tsconfig> [--trace <perf.json>] [--root <dir>]
+//
+// --root sets rootDir, for apps whose tsconfig sets outDir and imports sources from outside the
+// tsconfig's directory: TypeScript 6 reports TS6059 for those even without emitting.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -14,14 +21,20 @@ import {NgtscProgram, createCompilerHost, formatDiagnostics, readConfiguration} 
 
 const {values: args, positionals} = parseArgs({
   allowPositionals: true,
-  options: {trace: {type: 'string'}},
+  options: {trace: {type: 'string'}, root: {type: 'string'}},
 });
 if (positionals.length !== 1) {
   console.error('Usage: node harness/ngc-typecheck.mjs <tsconfig> [--trace <perf.json>]');
   process.exit(1);
 }
 
-const config = readConfiguration(path.resolve(positionals[0]), {noEmit: true});
+const tsconfig = path.resolve(positionals[0]);
+const overrides = {noEmit: true, ...(args.root ? {rootDir: path.resolve(args.root)} : {})};
+// ngc only accepts extendedDiagnostics with strictTemplates on (NG4003).
+if (readConfiguration(tsconfig).options.strictTemplates) {
+  overrides.extendedDiagnostics = {defaultCategory: 'suppress'};
+}
+const config = readConfiguration(tsconfig, overrides);
 if (config.errors.length > 0) {
   console.error(formatDiagnostics(config.errors));
   process.exit(1);
@@ -45,7 +58,5 @@ if (args.trace) {
   fs.writeFileSync(path.resolve(args.trace), JSON.stringify(perf, null, 2));
 }
 
-if (diags.length > 0) {
-  console.error(formatDiagnostics(diags));
-  process.exit(1);
-}
+if (diags.length > 0) console.error(formatDiagnostics(diags));
+if (diags.some((d) => d.category === 1 /* ts.DiagnosticCategory.Error */)) process.exit(1);

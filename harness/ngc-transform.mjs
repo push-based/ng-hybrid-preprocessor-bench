@@ -5,7 +5,10 @@
 // It never asks for TypeScript or template diagnostics, so no type-check blocks are generated.
 //
 // Usage: node harness/ngc-transform.mjs <tsconfig> --mode local|full --out <dir>
-//          [--trace <perf.json>] [--diagnostics]
+//          [--trace <perf.json>] [--diagnostics] [--root <dir>]
+//
+// --root sets rootDir: TypeScript 6 rejects an outDir without one (TS5011), and real apps' tsconfigs
+// never needed it because the Angular CLI doesn't emit through outDir.
 //
 // --trace writes ngc's own phase timings (angularCompilerOptions.tracePerformance).
 // --diagnostics also collects all diagnostics after emit and fails if there are any; the harness
@@ -22,6 +25,7 @@ const {values: args, positionals} = parseArgs({
     out: {type: 'string'},
     trace: {type: 'string'},
     diagnostics: {type: 'boolean', default: false},
+    root: {type: 'string'},
   },
 });
 if (positionals.length !== 1 || !args.out || !['local', 'full'].includes(args.mode)) {
@@ -36,6 +40,7 @@ const config = readConfiguration(path.resolve(positionals[0]), {
   sourceMap: true,
   compilationMode: args.mode === 'local' ? 'experimental-local' : 'full',
   ...(args.trace ? {tracePerformance: path.resolve(args.trace)} : {}),
+  ...(args.root ? {rootDir: path.resolve(args.root)} : {}),
 });
 if (config.errors.length > 0) {
   console.error(config.errors.map((d) => d.messageText).join('\n'));

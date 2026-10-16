@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.angular', 'out-tsc']);
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.angular', 'out-tsc', '.git', '.nx']);
 const SKIP_FILE = (name) => name === 'manifest.json' || name.endsWith('.ngdiag.json');
 
 export async function corpusHash(workspace) {

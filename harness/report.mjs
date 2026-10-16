@@ -122,6 +122,8 @@ function renderPair(section) {
         continue;
       }
       const ratio = b.hyperfine ? `**${(b.hyperfine.medianMs / c.hyperfine.medianMs).toFixed(2)}×**` : '–';
+      const known = c.gate?.knownTsgoErrors;
+      if (known) c.label += ` ¹`;
       out(
         `| | ${c.label} | ${sec(c.hyperfine.medianMs)}${noisy(c.hyperfine)} | ${sec(c.hyperfine.p95Ms)} | ${ratio} | ` +
           `${sec(c.hyperfine.cpuMs)} (${c.hyperfine.parallelism.toFixed(1)}) | ${mb(med(c.phaseRuns, (p) => p.rss))} |`,
@@ -130,6 +132,15 @@ function renderPair(section) {
   }
   out();
   out('"vs baseline" is the baseline median divided by the candidate median: above 1× means ngp\'s pipeline is faster.');
+  for (const r of results) {
+    const known = r.candidates.find((c) => c.gate?.knownTsgoErrors)?.gate.knownTsgoErrors;
+    if (known) {
+      out(
+        `\n¹ ${r.target.label} doesn't type-check under TypeScript 7 on its own sources: \`tsgo\` reports ${known.length} error${known.length === 1 ? '' : 's'} ` +
+          `(${[...new Set(known)].join(', ')}) before ngp is involved. ngp's output passed because \`tsgo\` reported exactly those errors and no others.`,
+      );
+    }
+  }
 
   // ngp phases, one table per scenario.
   const timed = results.flatMap((r) => r.candidates.filter((c) => c.phaseRuns?.length).map((c) => ({r, c})));

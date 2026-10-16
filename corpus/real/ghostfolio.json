@@ -1,0 +1,13 @@
+{
+  "name": "ghostfolio",
+  "repo": "https://github.com/ghostfolio/ghostfolio.git",
+  "sha": "204f0d857ef258a2c090780bce8b69429a094f95",
+  "notes": "Nx monorepo. The Angular client is apps/client and imports libraries from libs/. No angular.json, so ngp gets the tsconfig and --root.",
+  "tsconfigApp": "apps/client/tsconfig.app.json",
+  "ngpTarget": "apps/client/tsconfig.app.json",
+  "install": [
+    "npm install --legacy-peer-deps --min-release-age=0 --no-audit --no-fund"
+  ],
+  "angularVersion": "22.3.0-next.2",
+  "installNotes": "--min-release-age=0 overrides the repo's .npmrc (min-release-age=3): the pinned Angular prerelease is newer than three days. The lockfile keeps every other dependency where it was."
+}

@@ -1,0 +1,13 @@
+{
+  "name": "super-productivity",
+  "repo": "https://github.com/johannesjo/super-productivity.git",
+  "sha": "65145cdceec75286a32215fc519b5e8e6bb89a70",
+  "notes": "Angular CLI app (application builder), npm workspaces. strictTemplates is off in its tsconfig.",
+  "tsconfigApp": "src/tsconfig.app.json",
+  "ngpTarget": "src/tsconfig.app.json",
+  "install": [
+    "npm install --legacy-peer-deps --min-release-age=0 --no-audit --no-fund"
+  ],
+  "angularVersion": "22.3.0-next.2",
+  "installNotes": "--min-release-age=0 overrides the repo's .npmrc (min-release-age=3): the pinned Angular prerelease is newer than three days. The lockfile keeps every other dependency where it was."
+}

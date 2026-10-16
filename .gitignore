@@ -7,3 +7,5 @@ corpus/generated/
 corpus/.out/
 results/runs/
 results/smoke/
+corpus/real-apps/
+.idea/
