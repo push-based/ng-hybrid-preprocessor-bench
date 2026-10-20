@@ -1,12 +1,12 @@
 # ng-hybrid-preprocessor-bench
 
-Angular's new compiler, ngp, turns Angular source into JavaScript 1.3–3.6× faster than ngc, the compiler you use today, with a third to two thirds of its peak memory. But on a 2-core CI runner it doesn't yet make large apps type-check faster, even with TypeScript 7: at 5,000 components, ngp plus `tsgo` takes 37 s where ngc takes 28 s. This repo measures ngp against ngc on builds that do the same work, in CI, with every result checked for correctness before it's timed.
+Angular's new compiler, ngp, turns Angular source into JavaScript 1.5–3.9× faster than ngc, the compiler you use today, with a third to two thirds of its peak memory. With TypeScript 7 it type-checks the real apps here 1.6–2.3× faster, but not yet the largest generated app: on a 4-core CI runner, at 5,000 components, ngp plus `tsgo` takes 32 s where ngc takes 31 s. This repo measures ngp against ngc on builds that do the same work, in CI, with every result checked for correctness before it's timed.
 
-> **Status:** every scenario runs in CI on generated apps of 100, 1,000 and 5,000 components and on three real open-source apps. The numbers below come from one Angular commit (`92e5aa8`, the commit behind `22.3.0-next.2`) on GitHub's standard runners: 2-core ones for everything except Bitwarden, which ran later on 4 cores. ngp is a prototype, and these numbers describe that prototype.
+> **Status:** every scenario runs in CI on generated apps of 100, 1,000 and 5,000 components and on three real open-source apps. The numbers below come from one CI run, at one Angular commit (`92e5aa8`, the commit behind `22.3.0-next.2`), on GitHub's standard 4-core runners. ngp is a prototype, and these numbers describe that prototype.
 
 ## Results
 
-Unless noted, every number comes from CI [run 38888167669](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38888167669): 2 warm-up and 10 measured runs per pipeline, medians, a 6 GB heap limit for every Node process, generated apps and all output on a RAM disk. Each scenario ran on its own runner, and GitHub assigns each runner a different CPU, so compare ratios within a table, not seconds between tables. Every pipeline passed its correctness gates, and every app was byte-identical before and after its scenario. The full report, with phase breakdowns and per-section machines, is in the run's `bench-report` artifact.
+Every number comes from CI [run 39469262093](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/39469262093): 2 warm-up and 10 measured runs per pipeline, medians, a 6 GB heap limit for every Node process, generated apps and all output on a RAM disk. Each scenario ran on its own GitHub standard runner with 4 cores and 16 GB, and GitHub assigns each runner a different CPU, so compare ratios within a table, not seconds between tables. Every pipeline passed its correctness gates, every app was byte-identical before and after its scenario, and no pipeline's median absolute deviation went above 2.7% of its median. The full report, with phase breakdowns and per-section machines, is in the run's `bench-report` artifact.
 
 "×" means ngc's time divided by ngp's: above 1× ngp's pipeline is faster, below 1× it's slower.
 
@@ -14,24 +14,40 @@ Unless noted, every number comes from CI [run 38888167669](https://github.com/pu
 
 They mostly time the **Angular compiler step**, not a full `ng build`. ngp isn't wired into the Angular CLI yet, so no `ng build` can use it, and the Angular team has said it won't publish numbers until it can compare full CLI builds. What this repo compares is each job ngp takes part in, one job per scenario, with both sides finishing the same job. The `ng build` reference at the end shows how much of a real build each job is.
 
+### What changed from 2 cores to 4
+
+Earlier versions of this README came from [run 38888167669](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38888167669) and, for S3 and S8, [run 38899025048](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38899025048), made while this repository was private, on standard runners with 2 cores and 8 GB. Public repositories get 4 cores and 16 GB. Twice the cores mostly helps the pipelines that end in `tsgo`, which is multithreaded: on 2 cores they used 1.4–1.7 of them, here 1.8–2.5.
+
+| Pipeline | App | 2 cores | 4 cores |
+|---|---|---:|---:|
+| S4: ngp + `tsgo` type-check | 1,000 components | 1.03× | **1.24×** |
+| S4: ngp + `tsgo` type-check | 5,000 components | 0.75× | **0.96×** |
+| S4: ngp + `tsgo` type-check | Super Productivity | 1.87× | **2.18×** |
+| S4: ngp + `tsgo` type-check | Ghostfolio | 2.04× | **2.30×** |
+| S8: ngp + `tsgo` check and emit | 1,000 components | 1.28× | **1.59×** |
+| S8: ngp + `tsgo` check and emit | 5,000 components | 1.10× | **1.50×** |
+| S8: ngp + `tsgo` check and emit | Super Productivity | 2.09× | **2.65×** |
+| S8: ngp + `tsgo` check and emit | Ghostfolio | 2.41× | **2.79×** |
+| S7: ngp + bundle + `tsgo` | 5,000 components | 1.44× | **1.65×** |
+
+The same pipelines with `tsc` 6, which is mostly single-threaded, barely moved: S3 at 5,000 components went from 0.48× to 0.52×. The compile-only pipelines (S1, S2, S5) moved by −0.26× to +0.44×: down a little at 100 components, up a little at 1,000 and 5,000, both ways on the real apps. Two 4-core runs of Bitwarden on different CPUs differ by 0.33× in S1 alone (2.79× in [run 39463856365](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/39463856365), 2.46× here), so for these pipelines the runner's CPU matters about as much as its cores. The native analyzer didn't pull further ahead of wasm either (S5). ngp's rebuilds after an edit lose by less than they did (S6), 0.81–0.93× at 1,000 components against 0.62–0.68× and 0.74–0.77× at 5,000 against 0.53–0.57×, though both sides rebuild on one thread, so one run per core count can't say why.
+
 ### Compiler step: Angular source to JavaScript (S1, S2)
 
 ngc emits JavaScript through its own API ([harness/ngc-transform.mjs](harness/ngc-transform.mjs)), the way the CLI does inside a build, without type-checking. ngp writes TypeScript, and esbuild turns it into JavaScript. S1 compiles each file on its own; S2 adds the cross-file analysis that keeps NgModule bundles small.
 
 | App | Components | S1: ngc → ngp | S1 | S2: ngc → ngp | S2 | Peak memory (S2), ngc → ngp |
 |---|---:|---|---:|---|---:|---:|
-| generated | 100 | 2.79 → 1.14 s | **2.45×** | 3.64 → 1.53 s | **2.38×** | 423 → 242 MB |
-| generated | 1,000 | 9.58 → 5.42 s | **1.77×** | 12.2 → 7.34 s | **1.66×** | 712 → 480 MB |
-| generated | 5,000 | 31.7 → 22.3 s | **1.42×** | 42.6 → 32.1 s | **1.32×** | 2,089 → 1,273 MB |
-| Super Productivity | 252 | 23.0 → 7.07 s | **3.25×** | 29.8 → 8.48 s | **3.51×** | 1,551 → 568 MB |
-| Ghostfolio | 157 | 10.6 → 3.54 s | **2.98×** | 14.2 → 4.93 s | **2.87×** | 988 → 458 MB |
-| Bitwarden ³ | 598 | 28.1 → 10.1 s | **2.79×** | 17.0 → 8.44 s | **2.01×** | 1,914 → 1,087 MB |
+| generated | 100 | 2.28 → 0.99 s | **2.29×** | 2.91 → 1.29 s | **2.26×** | 403 → 239 MB |
+| generated | 1,000 | 7.99 → 4.42 s | **1.81×** | 10.4 → 5.75 s | **1.81×** | 703 → 475 MB |
+| generated | 5,000 | 32.2 → 20.1 s | **1.60×** | 38.5 → 25.4 s | **1.51×** | 2,059 → 1,280 MB |
+| Super Productivity | 252 | 21.0 → 5.68 s | **3.69×** | 24.8 → 6.41 s | **3.87×** | 1,551 → 565 MB |
+| Ghostfolio | 157 | 8.91 → 2.96 s | **3.01×** | 10.9 → 3.65 s | **3.00×** | 1,208 → 456 MB |
+| Bitwarden | 598 | 24.0 → 9.76 s | **2.46×** | 28.3 → 12.8 s | **2.21×** | 1,892 → 1,087 MB |
 
-³ From [run 39463856365](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/39463856365), the Bitwarden web vault's only CI run so far. It ran after this repository went public, and GitHub gives public repositories standard runners with 4 cores and 16 GB, not the 2 cores and 8 GB of every other row. The same run timed the 100-component app on the same runners as a reference, and its ratios came out within 0.25× of the 2-core run's: S1 2.35× (2-core: 2.45×), S2 2.15× (2.38×), S4 1.81× (1.80×), S5 native 2.21× (2.40×), S8 2.21× (2.18×). As everywhere, each scenario ran on its own runner and CPU, so compare Bitwarden's ratios, not its seconds across tables.
+On the generated apps, ngp's lead shrinks as the app grows, from 2.26× at 100 components to 1.51× at 5,000 in S2, which is the opposite of what [hypothesis 1](docs/research.md#what-should-get-faster) predicted. The phase timings say why. At 5,000 components in S2, ngp waits on its Rust analyzer for 2.3 s, while its TypeScript backend, Angular's existing template compiler, spends 12.4 s generating code and 3.5 s in `prepareChunk`. That backend's cost grows with the number of files, and Rust doesn't touch it.
 
-On the generated apps, ngp's lead shrinks as the app grows, which is the opposite of what [hypothesis 1](docs/research.md#what-should-get-faster) predicted. The phase timings say why. At 5,000 components in S2, ngp waits on its Rust analyzer for 2.6 s, while its TypeScript backend, Angular's existing template compiler, spends 14.6 s generating code and 3.8 s in `prepareChunk`. That backend's cost grows with the number of files, and Rust doesn't touch it.
-
-The real apps gain more, 2.0–3.6×, because their ngc time is dominated by TypeScript's own emit: 17.9 s of Super Productivity's 29.4 s, and 17.9 s of Bitwarden's 29.1 s in S1. On the ngp side, esbuild does that job, in 1.8 s and 2.4 s. Bitwarden, the largest real app, gains the least in S2 (2.01×): ngp spends 3.1 s in the backend's code generation, 1.8 s in `prepareChunk` and 1.1 s rewriting `.ngdiag.json`, against 0.8 s waiting on the analyzer.
+The real apps gain more, 2.2–3.9×, because their ngc time is dominated by TypeScript's own emit: 13.4 s of Super Productivity's 20.8 s, and 14.8 s of Bitwarden's 24.3 s in S1. On the ngp side, esbuild does that job, in 1.0 s and 2.1 s. Bitwarden, the largest real app, gains the least (2.46× in S1, 2.21× in S2): in S2, ngp spends 5.1 s in the backend's code generation, 2.1 s in `prepareChunk` and 1.2 s rewriting `.ngdiag.json`, against 1.3 s waiting on the analyzer.
 
 ### Type-checking templates and TypeScript (S3, S4)
 
@@ -39,18 +55,14 @@ ngc type-checks templates inside its own TypeScript 6 program. ngp writes the ty
 
 | App | Components | ngc | ngp + `tsc` 6 | × | ngp + `tsgo` 7 | × | Peak memory, ngc / ngp + `tsgo` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| generated | 100 | 2.65 s | 3.19 s | **0.83×** | 1.47 s | **1.80×** | 461 / 239 MB |
-| generated | 1,000 | 8.64 s | 13.8 s | **0.63×** | 8.41 s | **1.03×** | 816 / 1,024 MB |
-| generated | 5,000 | 27.8 s | 57.6 s | **0.48×** | 36.9 s | **0.75×** | 2,307 / 4,909 MB |
-| Super Productivity ² | 252 | 25.8 s | 28.8 s | **0.90×** | 13.8 s | **1.87×** | 1,716 / 1,362 MB |
-| Ghostfolio ² | 157 | 14.2 s | 14.6 s | **0.97×** | 6.96 s | **2.04×** | 1,224 / 537 MB |
-| Bitwarden ³ | 598 | 18.9 s | 26.0 s | **0.72×** | 12.0 s | **1.57×** | 1,819 / 1,503 MB |
+| generated | 100 | 2.65 s | 3.20 s | **0.83×** | 1.46 s | **1.82×** | 435 / 242 MB |
+| generated | 1,000 | 8.89 s | 14.1 s | **0.63×** | 7.16 s | **1.24×** | 758 / 1,005 MB |
+| generated | 5,000 | 30.8 s | 58.8 s | **0.52×** | 32.2 s | **0.96×** | 2,162 / 4,713 MB |
+| Super Productivity | 252 | 20.5 s | 23.8 s | **0.86×** | 9.40 s | **2.18×** | 1,559 / 1,325 MB |
+| Ghostfolio | 157 | 10.9 s | 10.9 s | **1.00×** | 4.73 s | **2.30×** | 1,325 / 531 MB |
+| Bitwarden | 598 | 25.0 s | 31.7 s | **0.79×** | 15.3 s | **1.64×** | 1,823 / 1,503 MB |
 
-² From a separate S3 run, [run 38899025048](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38899025048), where no result varied by more than 2.5%. In the full run, the real apps' ngp pipelines varied by 7–12% from run to run (Ghostfolio's `tsgo` pipeline anywhere from 6.9 s to 13.9 s) while ngc on the same runner stayed within 3%, so those numbers are left out. The rerun matches an earlier 3-run sample (1.85× and 2.06× with `tsgo`) and repeats the generated apps' ratios almost exactly: 1.75×, 1.05× and 0.75× with `tsgo`.
-
-³ Bitwarden comes from [run 39463856365](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/39463856365), on a 4-core runner; see the note under S1 and S2.
-
-TypeScript 7 roughly halves the type-check of ngp's output compared with TypeScript 6. That's enough for ngp to beat ngc on small apps, not on large ones: at 5,000 components, `tsgo` alone takes 18.6 s and ngp's pipeline peaks at 4.9 GB, against ngc's 2.3 GB. Bitwarden, the largest real app at 598 components and 3,295 files, lands in between: 1.57× with `tsgo` and 0.72× with `tsc` 6, even on 4 cores. ngc builds its type-check blocks in memory and checks them in the program it already has; ngp's route means a second, separate program over twice as many files, 5,429 outputs plus 5,429 type-check blocks. `tsgo` is multithreaded and these runners have 2 cores, so more cores should help it, and this repo hasn't measured that yet.
+TypeScript 7 roughly halves ngp's type-check pipeline compared with TypeScript 6, and the TypeScript step itself runs 3–6× faster. That's enough for ngp to beat ngc up to 1,000 components and on every real app, but not at 5,000 components: there, ngp's pipeline takes 32.2 s against ngc's 30.8 s and peaks at 4.7 GB against ngc's 2.2 GB. `tsgo` accounts for only 12.1 s of those 32.2 s; the rest is ngp itself, 12.6 s of it generating code. Bitwarden, the largest real app at 598 components and 3,295 files, lands in between: 1.64× with `tsgo` and 0.79× with `tsc` 6. ngc builds its type-check blocks in memory and checks them in the program it already has; ngp's route means a second, separate program over twice as many files, on the 5,000-component app 5,429 outputs plus 5,429 type-check blocks. Going from 2 to 4 cores moved the `tsgo` column, 0.75× to 0.96× at 5,000 components and 1.03× to 1.24× at 1,000, and left the `tsc` 6 column where it was.
 
 Diagnostics are compared too, after mapping each error in a type-check block back to its template location. On the generated apps both sides report nothing, and a planted error is reported by ngc, `tsc` and `tsgo` with the same code at the same line and column. On the real apps:
 
@@ -64,16 +76,14 @@ The S2 job with each engine forced in turn: the native N-API addon, the single-t
 
 | App | Components | ngc | native | wasm | sidecar | Peak memory, native / sidecar |
 |---|---:|---:|---:|---:|---:|---:|
-| generated | 100 | 3.48 s | 1.45 s (**2.40×**) | 1.87 s (**1.86×**) | 1.47 s (**2.36×**) | 240 / 217 MB |
-| generated | 1,000 | 11.9 s | 7.22 s (**1.65×**) | 8.44 s (**1.41×**) | 7.26 s (**1.64×**) | 477 / 341 MB |
-| generated | 5,000 | 44.4 s | 31.3 s (**1.42×**) | 40.3 s (**1.10×**) | 31.3 s (**1.42×**) | 1,268 / 641 MB |
-| Super Productivity | 252 | 28.7 s | 8.03 s (**3.58×**) | 16.1 s (**1.79×**) | 8.07 s (**3.56×**) | 563 / 340 MB |
-| Ghostfolio | 157 | 13.3 s | 4.56 s (**2.91×**) | 5.72 s (**2.32×**) | 4.55 s (**2.92×**) | 451 / 339 MB |
-| Bitwarden ³ | 598 | 18.0 s | 8.67 s (**2.08×**) | 12.7 s (**1.42×**) | 8.20 s (**2.20×**) | 1,084 / 588 MB |
+| generated | 100 | 2.61 s | 1.22 s (**2.14×**) | 1.45 s (**1.80×**) | 1.20 s (**2.17×**) | 238 / 216 MB |
+| generated | 1,000 | 9.89 s | 5.67 s (**1.74×**) | 6.50 s (**1.52×**) | 5.62 s (**1.76×**) | 476 / 343 MB |
+| generated | 5,000 | 37.8 s | 24.8 s (**1.52×**) | 30.5 s (**1.24×**) | 24.3 s (**1.56×**) | 1,284 / 648 MB |
+| Super Productivity | 252 | 23.0 s | 6.83 s (**3.37×**) | 12.6 s (**1.83×**) | 6.63 s (**3.48×**) | 581 / 341 MB |
+| Ghostfolio | 157 | 9.90 s | 3.56 s (**2.78×**) | 4.42 s (**2.24×**) | 3.63 s (**2.72×**) | 459 / 363 MB |
+| Bitwarden | 598 | 26.7 s | 12.8 s (**2.09×**) | 18.9 s (**1.41×**) | 12.8 s (**2.08×**) | 1,083 / 584 MB |
 
-³ Bitwarden comes from [run 39463856365](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/39463856365), on a 4-core runner; see the note under S1 and S2.
-
-wasm is still faster than ngc everywhere, but it gives up a lot: on Super Productivity it takes twice as long as native, and at 5,000 components the backend waits 9.1 s on it against 2.5 s for native. The sidecar is as fast as the in-process addon and needs the least memory of the three, because the analysis lives in a second process. On a 2-core runner, native's thread pool has little room to work, so this table understates the gap between native and wasm on a bigger machine.
+wasm is still faster than ngc everywhere, but it gives up a lot: on Super Productivity it takes nearly twice as long as native, and at 5,000 components the backend waits 5.9 s on it against 2.2 s for native. The sidecar is as fast as the in-process addon and needs the least memory of the three, because the analysis lives in a second process. Twice the cores didn't widen the gap between native and wasm: wasm took 1.29× as long as native at 5,000 components on 2 cores and 1.23× here, and 2.0× and 1.84× on Super Productivity. The native analyzer isn't what holds the pipeline back. At 5,000 components the backend waits 2.2 s on it and spends 12.8 s in its own single-threaded code generation, and the native pipelines use 1.2–1.6 of the 4 cores.
 
 ### Rebuild after one edit (S6)
 
@@ -81,17 +91,17 @@ How long each compiler takes to bring its output up to date after one changed fi
 
 | Components | Edit | ngc | ngp | × | Files ngc re-emitted | Files ngp regenerated |
 |---:|---|---:|---:|---:|---:|---:|
-| 100 | component class | 0.10 s | 0.06 s | **1.89×** | 2 | 6 |
-| 100 | external template | 0.08 s | 0.05 s | **1.43×** | 1 | 6 |
-| 100 | shared type | 0.05 s | 0.04 s | **1.19×** | 1 | 5 |
-| 1,000 | component class | 0.26 s | 0.39 s | **0.68×** | 2 | 42 |
-| 1,000 | external template | 0.24 s | 0.39 s | **0.62×** | 1 | 42 |
-| 1,000 | shared type | 0.23 s | 0.37 s | **0.63×** | 1 | 41 |
-| 5,000 | component class | 1.14 s | 2.05 s | **0.56×** | 2 | 202 |
-| 5,000 | external template | 1.17 s | 2.06 s | **0.57×** | 1 | 202 |
-| 5,000 | shared type | 1.11 s | 2.09 s | **0.53×** | 1 | 201 |
+| 100 | component class | 0.06 s | 0.03 s | **2.14×** | 2 | 6 |
+| 100 | external template | 0.04 s | 0.03 s | **1.57×** | 1 | 6 |
+| 100 | shared type | 0.03 s | 0.02 s | **1.55×** | 1 | 5 |
+| 1,000 | component class | 0.16 s | 0.18 s | **0.93×** | 2 | 42 |
+| 1,000 | external template | 0.15 s | 0.18 s | **0.83×** | 1 | 42 |
+| 1,000 | shared type | 0.15 s | 0.18 s | **0.81×** | 1 | 41 |
+| 5,000 | component class | 0.73 s | 0.96 s | **0.77×** | 2 | 202 |
+| 5,000 | external template | 0.73 s | 0.95 s | **0.77×** | 1 | 202 |
+| 5,000 | shared type | 0.71 s | 0.96 s | **0.74×** | 1 | 201 |
 
-ngp wins the initial build, 1.5–2.9× like S2, then loses most rebuilds. Its analyzer marks every file that imports the edited one as stale, even for a template-only change, so a one-component edit regenerates 42 files at 1,000 components and 202 at 5,000. ngc re-emits one or two. This comparison gives ngc its best case: ngc saves its incremental state only after template type-checking, and S6 rebuilds without type-checking, so the harness saves that state after emit. Without it, every ngc rebuild would be a full compile.
+ngp wins the initial build, 1.5–2.9× like S2, then loses every rebuild from 1,000 components up. Its analyzer marks every file that imports the edited one as stale, even for a template-only change, so a one-component edit regenerates 42 files at 1,000 components and 202 at 5,000. ngc re-emits one or two. This comparison gives ngc its best case: ngc saves its incremental state only after template type-checking, and S6 rebuilds without type-checking, so the harness saves that state after emit. Without it, every ngc rebuild would be a full compile.
 
 ### Development bundle (S7, indicative)
 
@@ -99,28 +109,26 @@ A development build that has to boot in headless Chrome. `ng build --configurati
 
 | Components | `ng build` | ngp + bundle | × | ngp + bundle + `tsgo` | × |
 |---:|---:|---:|---:|---:|---:|
-| 100 | 5.82 s | 2.91 s | **2.00×** | 3.51 s | **1.66×** |
-| 1,000 | 20.4 s | 8.80 s | **2.31×** | 12.9 s | **1.58×** |
-| 5,000 | 76.4 s | 30.8 s | **2.48×** | 52.9 s | **1.44×** |
+| 100 | 3.21 s | 1.72 s | **1.87×** | 2.02 s | **1.59×** |
+| 1,000 | 12.5 s | 5.08 s | **2.45×** | 7.16 s | **1.74×** |
+| 5,000 | 51.2 s | 19.1 s | **2.68×** | 31.1 s | **1.65×** |
 
 Every build booted, rendered its routes and logged no errors.
 
 ### The ViteConf 2026 comparison (S8)
 
-At ViteConf 2026, Alex Rickabaugh reported about 13 s down to 4.5 s, "almost three times faster", for the whole compiler job: old ngc against ngp followed by TypeScript 7 ([talk notes](docs/research.md#what-the-angular-team-said-at-viteconf-2026)). He named neither the app nor the machine. S8 reproduces that job: ngc's full compile, every diagnostic and then emit, against `ngp --optimize` followed by one TypeScript run that type-checks ngp's output and emits JavaScript, with `tsgo` 7 and, for contrast, `tsc` 6. From [run 38899025048](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/38899025048), on one 2-core runner:
+At ViteConf 2026, Alex Rickabaugh reported about 13 s down to 4.5 s, "almost three times faster", for the whole compiler job: old ngc against ngp followed by TypeScript 7 ([talk notes](docs/research.md#what-the-angular-team-said-at-viteconf-2026)). He named neither the app nor the machine. S8 reproduces that job: ngc's full compile, every diagnostic and then emit, against `ngp --optimize` followed by one TypeScript run that type-checks ngp's output and emits JavaScript, with `tsgo` 7 and, for contrast, `tsc` 6.
 
 | App | Components | ngc | ngp + `tsgo` 7 | × | ngp + `tsc` 6 | × | Peak memory, ngc / ngp + `tsgo` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| generated | 100 | 4.63 s | 2.13 s | **2.18×** | 5.06 s | **0.92×** | 471 / 241 MB |
-| generated | 1,000 | 16.9 s | 13.2 s | **1.28×** | 22.4 s | **0.75×** | 836 / 1,249 MB |
-| generated | 5,000 | 62.1 s | 56.4 s | **1.10×** | 90.8 s | **0.68×** | 2,968 / 6,032 MB |
-| Super Productivity | 252 | 34.6 s | 16.6 s | **2.09×** | 34.3 s | **1.01×** | 1,859 / 1,695 MB |
-| Ghostfolio | 157 | 18.2 s | 7.56 s | **2.41×** | 18.2 s | **1.00×** | 1,320 / 668 MB |
-| Bitwarden ³ | 598 | 33.8 s | 16.7 s | **2.03×** | 39.4 s | **0.86×** | 2,040 / 2,080 MB |
+| generated | 100 | 3.33 s | 1.56 s | **2.13×** | 3.67 s | **0.91×** | 455 / 238 MB |
+| generated | 1,000 | 12.9 s | 8.10 s | **1.59×** | 18.0 s | **0.72×** | 863 / 1,279 MB |
+| generated | 5,000 | 54.0 s | 36.0 s | **1.50×** | 77.8 s | **0.69×** | 2,576 / 6,092 MB |
+| Super Productivity | 252 | 26.1 s | 9.83 s | **2.65×** | 26.7 s | **0.98×** | 1,716 / 1,671 MB |
+| Ghostfolio | 157 | 13.1 s | 4.69 s | **2.79×** | 12.0 s | **1.09×** | 1,362 / 661 MB |
+| Bitwarden | 598 | 34.2 s | 16.5 s | **2.07×** | 39.5 s | **0.87×** | 2,017 / 2,067 MB |
 
-³ Bitwarden comes from [run 39463856365](https://github.com/push-based/ng-hybrid-preprocessor-bench/actions/runs/39463856365), on a 4-core runner; see the note under S1 and S2.
-
-On the three real apps, ngp plus TypeScript 7 does the whole compiler job 2.0–2.4× faster than ngc (Super Productivity and Ghostfolio on 2 cores, Bitwarden 2.03× on 4), in the range of his "almost three times" on a machine he didn't name. Nearly all of that comes from TypeScript 7: with `tsc` 6 the same pipeline only matches ngc. On the generated apps the gain shrinks with size, as in S4, and at 5,000 components ngp plus `tsgo` needs 6 GB, against ngc's 3 GB. Type errors differ from ngc's exactly as in S3: Ghostfolio's TS2774 in `page-tabs.component.html`, Super Productivity's two TypeScript 7 errors that its own sources have too, and Bitwarden's 34. Bitwarden's ngp pipeline also needs as much memory as ngc, 2.1 GB against 2.0 GB.
+On the three real apps, ngp plus TypeScript 7 does the whole compiler job 2.1–2.8× faster than ngc, close to his "almost three times" on a machine he didn't name. Nearly all of that comes from TypeScript 7: with `tsc` 6 the same pipeline only matches ngc, 0.87–1.09×. On the generated apps the gain shrinks with size, as in S4, but stays above 1×: at 5,000 components it's 1.50× here against 0.96× in S4, because emit is part of this job, and ngc spends 22.8 s of its 53.4 s compiling and emitting while `tsgo` checks and emits in 15.4 s. That pipeline needs 6.1 GB, against ngc's 2.6 GB. Type errors differ from ngc's exactly as in S3: Ghostfolio's TS2774 in `page-tabs.component.html`, Super Productivity's two TypeScript 7 errors that its own sources have too, and Bitwarden's 34. Bitwarden's ngp pipeline also needs as much memory as ngc, 2.1 GB against 2.0 GB.
 
 ### A full `ng build`, for context (R)
 
@@ -128,14 +136,14 @@ No ngp column: this is a cold `ng build --aot`, split with the CLI's own phase t
 
 | App | Components | Development build | Angular compilation | Type-check | Production build |
 |---|---:|---:|---:|---:|---:|
-| generated | 100 | 5.86 s | 2.75 s (46%) | 2.08 s (35%) | 6.65 s |
-| generated | 1,000 | 20.5 s | 9.77 s (47%) | 9.41 s (46%) | 22.0 s |
-| generated | 5,000 | 77.0 s | 40.4 s (52%) | 35.4 s (46%) | 84.4 s |
-| Super Productivity | 252 | 44.7 s | 33.8 s (75%) | 6.77 s (15%) | 60.5 s |
+| generated | 100 | 4.07 s | 1.84 s (45%) | 1.27 s (31%) | 4.54 s |
+| generated | 1,000 | 15.3 s | 7.45 s (48%) | 6.82 s (44%) | 15.6 s |
+| generated | 5,000 | 61.9 s | 30.3 s (50%) | 27.5 s (46%) | 62.6 s |
+| Super Productivity | 252 | 32.7 s | 26.2 s (79%) | 3.64 s (11%) | 41.6 s |
 
 ### What it adds up to
 
-Angular compilation, the part ngp speeds up most, is about half of a development build on the generated apps and three quarters on Super Productivity. Type-checking is the other half on the generated apps, and that's the part ngp doesn't yet speed up at scale on these runners. So on a 2-core machine, today's ngp would shorten a small app's build a lot and a large generated app's build little, and its rebuilds after an edit would be slower than ngc's from 1,000 components up. For the whole compiler job (S8), the real apps come out 2.0–2.4× faster with TypeScript 7, close to what the Angular team showed. Two things this repo hasn't measured could change that picture: more cores, where both the native analyzer and `tsgo` are built to scale, and an ngp that runs inside the CLI in one process.
+Angular compilation, the part ngp speeds up most, is about half of a development build on the generated apps and four fifths on Super Productivity. Type-checking is the other half on the generated apps, and that's where ngp's lead runs out at scale: with TypeScript 7 on 4 cores it type-checks 1,000 components 1.24× faster than ngc, and 5,000 components at 0.96×. So on a 4-core machine, today's ngp would shorten a small or mid-sized app's build a lot and a large generated app's build little, and its rebuilds after an edit would still be slower than ngc's from 1,000 components up. For the whole compiler job (S8), the real apps come out 2.1–2.8× faster with TypeScript 7, close to what the Angular team showed. Going from 2 to 4 cores helped consistently only where `tsgo` runs. Two things this repo hasn't measured could still change the picture: machines with more than 4 cores, and an ngp that runs inside the CLI in one process.
 
 ## Findings beyond speed
 
@@ -145,9 +153,9 @@ Angular compilation, the part ngp speeds up most, is about half of a development
 - **ngp's type-check blocks can report errors ngc doesn't.** Ghostfolio's `@if (tab.onClick)` gets TS2774 from ngp's blocks and nothing from ngc's.
 - **ngp can copy an input's transform type from the wrong file.** Bitwarden's `InputPasswordComponent` declares `@Input({ transform: (val: string) => ... }) email`. In the type-check block of each component that binds `[email]`, ngp writes the transform's parameter type by slicing the *consuming* component's source at the offsets of `string` in the *declaring* file, so four blocks get `tepper`, `asswor`, `nseale` and `s.chan` where `string` belongs: TS2304 and TS2503. The output for the build itself is unaffected; only type-checking breaks.
 - **ngp skips type-only modules.** Super Productivity's `electron/shared-with-frontend/get-dist-channel.ts` exports only types, and ngp writes no output for it.
-- **ngp rewrites `.ngdiag.json` after every chunk.** The analyzer streams one file per chunk, so on the 5,000-component app ngp writes that file 5,429 times, 1.4 s of the run.
+- **ngp rewrites `.ngdiag.json` after every chunk.** The analyzer streams one file per chunk, so on the 5,000-component app ngp writes that file 5,429 times, 1.1 s of a 25 s run in S2.
 - **ngc's incremental state needs a type-check.** ngc saves the state that lets a rebuild skip unchanged files only after template type-checking. A transform-only rebuild loop is always a full compile.
-- **ngc's full type-check of a large app doesn't fit Node's default heap on GitHub's standard runner.** On the 5,000-component app it aborts with "JavaScript heap out of memory" at a 2 GB heap and peaks at 2.7 GB with more room.
+- **ngc's full type-check of a large app doesn't fit Node's default heap on GitHub's 2-core, 8 GB runner.** On the 5,000-component app it aborts with "JavaScript heap out of memory" at a 2 GB heap and peaks at 2.7 GB with more room.
 - **Template errors point at the type-check block.** Plain `tsc` and `tsgo` report a template error at its line in the `.ngtypecheck.ts` file. Mapping it back takes the block's header, its `_tcbN(this: Class)` function and the span comment after the error; [harness/lib/diagnostics.mjs](harness/lib/diagnostics.mjs) does that.
 
 ## What ngp is
@@ -168,7 +176,7 @@ Results come from CI. [.github/workflows/bench.yml](.github/workflows/bench.yml)
 gh workflow run bench.yml -f sizes=100,1000,5000 -f real=super-productivity,ghostfolio,bitwarden -f runs=10 -f warmup=2 -f phase_runs=3
 ```
 
-`scenarios` picks a subset, for example `-f scenarios=S3`. The merged report goes to the job summary and the `bench-report` artifact. A full run takes about 1½ hours of wall time and 6½ runner-hours.
+`scenarios` picks a subset, for example `-f scenarios=S3`. The merged report goes to the job summary and the `bench-report` artifact. A full run takes about 2 hours of wall time and 8 runner-hours.
 
 `pnpm bench` runs the same harness locally. Local runs are sanity checks only: on a laptop, an IDE or Spotlight indexing thousands of new files is enough to make results unusable.
 
@@ -242,4 +250,4 @@ It shallow-fetches the pinned commit into `corpus/real-apps/`, applies the pin's
 
 ## Caveats
 
-ngp is a prototype. Its source carries a notice that the Angular team isn't accepting issues or pull requests for it, and `22.3.0-next.2` alone contains fourteen compiler-cli fixes, most of them for ngp. These results describe one Angular commit on 2-core runners. Each report names the commit, the CPU and the runner image.
+ngp is a prototype. Its source carries a notice that the Angular team isn't accepting issues or pull requests for it, and `22.3.0-next.2` alone contains fourteen compiler-cli fixes, most of them for ngp. These results describe one Angular commit on 4-core runners. Each report names the commit, the CPU and the runner image.
