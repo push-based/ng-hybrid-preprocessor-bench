@@ -15,7 +15,7 @@ on:
         description: Generated app sizes, comma-separated (100, 1000, 5000)
         default: '100'
       real:
-        description: Real apps from corpus/real, comma-separated (super-productivity, ghostfolio)
+        description: Real apps from corpus/real, comma-separated (super-productivity, ghostfolio, bitwarden)
         default: ''
       scenarios:
         description: Scenarios, comma-separated (S1, S2, S3 incl. S4, S5, S6, S7, S8, R)

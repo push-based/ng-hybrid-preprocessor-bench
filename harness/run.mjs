@@ -264,7 +264,10 @@ async function resolveTarget(item) {
     ngpTarget: path.join(workspace, manifest.ngpTarget ?? manifest.tsconfigApp),
     // A real app builds with its own CLI install.
     ngBin: path.join(workspace, 'node_modules/@angular/cli/bin/ng.js'),
-    paths: resolvedPaths(path.join(workspace, manifest.tsconfigApp)),
+    paths: {
+      ...(await workspacePackagePaths(workspace)),
+      ...resolvedPaths(path.join(workspace, manifest.tsconfigApp)),
+    },
   };
 }
 
@@ -319,6 +322,34 @@ function resolvedPaths(tsconfig) {
   return Object.fromEntries(
     Object.entries(paths).map(([k, targets]) => [k, targets.map((x) => path.resolve(pathsBasePath, x))]),
   );
+}
+
+/**
+ * Deep-import aliases (`<name>/*`) for the app's own workspace packages: the npm-workspace symlinks
+ * in its node_modules that point back into the repo. TypeScript resolves an import like
+ * `@bitwarden/components/src/dialog/dialog.service`, which no tsconfig alias covers, through that
+ * symlink to the original source, so ngp's type-check program would load the original next to
+ * ngp's output and see two copies of every class in it. As aliases, remappedPaths points them at
+ * ngp's output like the rest. The app's own aliases take precedence.
+ */
+async function workspacePackagePaths(workspace) {
+  const modules = path.join(workspace, 'node_modules');
+  const names = [];
+  for (const e of await fs.readdir(modules, {withFileTypes: true}).catch(() => [])) {
+    if (e.name.startsWith('@') && e.isDirectory()) {
+      for (const s of await fs.readdir(path.join(modules, e.name))) names.push(`${e.name}/${s}`);
+    } else names.push(e.name);
+  }
+  const paths = {};
+  for (const name of names) {
+    const link = path.join(modules, name);
+    if (!(await fs.lstat(link)).isSymbolicLink()) continue;
+    const target = await fs.realpath(link).catch(() => null);
+    const rel = target && path.relative(workspace, target);
+    if (!rel || rel.startsWith('..') || rel.split(path.sep).includes('node_modules')) continue;
+    paths[`${name}/*`] = [path.join(target, '*')];
+  }
+  return paths;
 }
 
 /**
@@ -779,8 +810,8 @@ for (const scenarioId of scenarios) {
       console.log(`\n== ${scenarioId} ${t.name}: skipped, this scenario supports generated apps only`);
       continue;
     }
-    if (scenario.reference && !existsSync(path.join(t.workspace, 'angular.json'))) {
-      console.log(`\n== ${scenarioId} ${t.name}: skipped, not an Angular CLI workspace (no angular.json)`);
+    if (scenario.reference && (t.manifest.cliBuild === false || !existsSync(path.join(t.workspace, 'angular.json')))) {
+      console.log(`\n== ${scenarioId} ${t.name}: skipped, not built with the Angular CLI`);
       continue;
     }
     if (scenario.reference) await runReference(scenarioId, scenario, t);

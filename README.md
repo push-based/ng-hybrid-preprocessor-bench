@@ -50,6 +50,7 @@ Diagnostics are compared too, after mapping each error in a type-check block bac
 
 - **Ghostfolio:** ngp's type-check blocks report TS2774 ("This condition will always return true since this function is always defined") at `libs/ui/src/lib/page-tabs/page-tabs.component.html:13:12`, the line `@if (tab.onClick) {`. ngc doesn't. It's one of the rare new type errors the Angular team said ngp's output can surface.
 - **Super Productivity:** `tsgo` reports two errors in `datetime-picker.component.ts` (TS18046, TS2769). It reports the same two on the app's own sources, before ngp is involved, so they're a TypeScript 7 migration issue in the app, not an ngp difference.
+- **Bitwarden** (local runs so far, not CI): ngc reports nothing under `strictTemplates`, and ngp's type-check blocks report 34 errors, the same 34 from `tsc` and `tsgo`. Five come from a bug that writes text from the wrong file into a type-check block (see [Findings](#findings-beyond-speed)). The rest are places where ngp's blocks check more strictly than ngc's: 12 TS2344 and 5 TS2322 on generic components (`ChipFilterComponent<T>`, `NgIterable` inferred as `unknown`), 9 TS2367 where an `@if` narrowing is reapplied inside an event listener in the same block, 2 TS2341 on `private` `@HostListener` methods, and 1 TS2872 on `@if ({...})`, an object literal that's always truthy. `tsgo` also reports two TypeScript 7 errors in `toggle-group.component.ts` that it reports on the app's own sources too.
 
 ### Analyzer engines (S5)
 
@@ -111,7 +112,7 @@ On the two real apps, ngp plus TypeScript 7 does the whole compiler job 2.1–2.
 
 ### A full `ng build`, for context (R)
 
-No ngp column: this is a cold `ng build --aot`, split with the CLI's own phase timings, to show how much of a real build each job above is. The CLI bundles while it compiles, so phases overlap and the percentages don't add up to 100%. Ghostfolio has no `angular.json`, so it isn't here.
+No ngp column: this is a cold `ng build --aot`, split with the CLI's own phase timings, to show how much of a real build each job above is. The CLI bundles while it compiles, so phases overlap and the percentages don't add up to 100%. Ghostfolio has no `angular.json` and Bitwarden builds with webpack, not the CLI, so neither is here.
 
 | App | Components | Development build | Angular compilation | Type-check | Production build |
 |---|---:|---:|---:|---:|---:|
@@ -130,6 +131,7 @@ Angular compilation, the part ngp speeds up most, is about half of a development
 - **ngp lowercases output paths on macOS and Windows.** `ngp.ts` lowercases paths there when computing where an output goes, so `dirtyDeepCopy.ts` comes out as `dirtydeepcopy.ts`. Imports still say `dirtyDeepCopy`, and with `forceConsistentCasingInFileNames` the type-check fails (TS1261). CI runs on Linux, where this doesn't happen.
 - **ngp's output fails `noUnusedLocals` and `noUnusedParameters`.** Compiled templates have unused `ctx` parameters and type-check blocks have never-called `_tcbN` functions (TS6133). Both sides of the type-check comparison run with those checks off.
 - **ngp's type-check blocks can report errors ngc doesn't.** Ghostfolio's `@if (tab.onClick)` gets TS2774 from ngp's blocks and nothing from ngc's.
+- **ngp can copy an input's transform type from the wrong file.** Bitwarden's `InputPasswordComponent` declares `@Input({ transform: (val: string) => ... }) email`. In the type-check block of each component that binds `[email]`, ngp writes the transform's parameter type by slicing the *consuming* component's source at the offsets of `string` in the *declaring* file, so four blocks get `tepper`, `asswor`, `nseale` and `s.chan` where `string` belongs: TS2304 and TS2503. The output for the build itself is unaffected; only type-checking breaks.
 - **ngp skips type-only modules.** Super Productivity's `electron/shared-with-frontend/get-dist-channel.ts` exports only types, and ngp writes no output for it.
 - **ngp rewrites `.ngdiag.json` after every chunk.** The analyzer streams one file per chunk, so on the 5,000-component app ngp writes that file 5,429 times, 1.4 s of the run.
 - **ngc's incremental state needs a type-check.** ngc saves the state that lets a rebuild skip unchanged files only after template type-checking. A transform-only rebuild loop is always a full compile.
@@ -151,7 +153,7 @@ Speed without correctness means nothing for a prototype compiler, so every pipel
 Results come from CI. [.github/workflows/bench.yml](.github/workflows/bench.yml) builds the toolchain, reruns the golden tests and the corpus checks, then runs each scenario as its own job and merges their reports. Pushes and pull requests run a small sample. For a full run, start the workflow from the Actions tab, or with the GitHub CLI:
 
 ```bash
-gh workflow run bench.yml -f sizes=100,1000,5000 -f real=super-productivity,ghostfolio -f runs=10 -f warmup=2 -f phase_runs=3
+gh workflow run bench.yml -f sizes=100,1000,5000 -f real=super-productivity,ghostfolio,bitwarden -f runs=10 -f warmup=2 -f phase_runs=3
 ```
 
 `scenarios` picks a subset, for example `-f scenarios=S3`. The merged report goes to the job summary and the `bench-report` artifact. A full run takes about 1½ hours of wall time and 6½ runner-hours.
@@ -217,7 +219,7 @@ The real apps are pinned in [corpus/real/](corpus/real/):
 node corpus/fetch-real.mjs super-productivity
 ```
 
-It shallow-fetches the pinned commit into `corpus/real-apps/`, pins every Angular package to `22.3.0-next.2`, installs, and writes a manifest. Then `--size real:super-productivity` benchmarks it. [Super Productivity](https://github.com/johannesjo/super-productivity) is an Angular CLI app with 252 components; [Ghostfolio](https://github.com/ghostfolio/ghostfolio) is an Nx monorepo with 157. [docs/methodology.md](docs/methodology.md#corpus) explains the install flags they need.
+It shallow-fetches the pinned commit into `corpus/real-apps/`, applies the pin's migration patch if it has one, pins every Angular package to `22.3.0-next.2`, installs, and writes a manifest. Then `--size real:super-productivity` benchmarks it. [Super Productivity](https://github.com/johannesjo/super-productivity) is an Angular CLI app with 252 components; [Ghostfolio](https://github.com/ghostfolio/ghostfolio) is an Nx monorepo with 157; [Bitwarden's web vault](https://github.com/bitwarden/clients/tree/main/apps/web), the app the Angular team is said to have tested ngp on most, is an Nx monorepo with 598 components across 3,295 source files. [docs/methodology.md](docs/methodology.md#corpus) explains the install flags and the Bitwarden patch.
 
 ## Requirements
 
