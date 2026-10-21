@@ -2,11 +2,13 @@
 // it for the benchmark.
 //
 // 1. Shallow-fetches the commit pinned in corpus/real/<name>.json.
-// 2. Pins every @angular/* framework and CLI package to that file's `angularVersion`, the version
+// 2. Applies the pin's `patch`, if it has one: the source edits an app on an older Angular or
+//    TypeScript needs to compile under the pinned versions, kept next to the pin.
+// 3. Pins every @angular/* framework and CLI package to that file's `angularVersion`, the version
 //    the ngp toolchain is built from, so ngc, ngp and the app see the same Angular. Libraries that
 //    declare a peer range like ^22.0.0 reject prereleases, hence --legacy-peer-deps.
-// 3. Runs the app's install commands (which run its own prepare scripts).
-// 4. Writes manifest.json: the pin, the source file count ngp should emit, a component count, and
+// 4. Runs the app's install commands (which run its own prepare scripts).
+// 5. Writes manifest.json: the pin, the source file count ngp should emit, a component count, and
 //    a SHA-256 over the sources so the harness can check nothing changed them.
 //
 // Usage: node corpus/fetch-real.mjs <name>
@@ -37,6 +39,7 @@ sh('git init -q');
 sh(`git remote add origin ${pin.repo}`);
 sh(`git fetch -q --depth 1 origin ${pin.sha}`);
 sh('git -c advice.detachedHead=false checkout -q FETCH_HEAD');
+if (pin.patch) sh(`git apply ${path.join(root, 'corpus/real', pin.patch)}`);
 
 const pkgPath = path.join(dest, 'package.json');
 const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8'));
@@ -73,6 +76,9 @@ const manifest = {
   tsconfigApp: pin.tsconfigApp,
   tsconfigRoot: pin.tsconfigRoot ?? pin.tsconfigApp,
   ngpTarget: pin.ngpTarget,
+  patch: pin.patch ?? null,
+  // false when the app's real build isn't the Angular CLI, even if it has an angular.json.
+  cliBuild: pin.cliBuild ?? true,
   sourceTs: sources.length,
   components,
   sha256: await corpusHash(dest),

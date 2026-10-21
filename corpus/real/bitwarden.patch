@@ -1,0 +1,157 @@
+diff --git a/apps/web/tsconfig.build.json b/apps/web/tsconfig.build.json
+index c1e7a88..595693a 100644
+--- a/apps/web/tsconfig.build.json
++++ b/apps/web/tsconfig.build.json
+@@ -1,5 +1,6 @@
+ {
+   "extends": "./tsconfig.json",
+   "files": ["src/polyfills.ts", "src/main.ts", "src/theme.ts"],
+-  "include": ["src/connectors/*.ts", "src/connectors/platform/*.ts"]
++  "include": ["src/connectors/*.ts", "src/connectors/platform/*.ts"],
++  "exclude": ["**/*.spec.ts"]
+ }
+diff --git a/libs/components/src/dialog/dialog.service.ts b/libs/components/src/dialog/dialog.service.ts
+index 8f014ce..45da89f 100644
+--- a/libs/components/src/dialog/dialog.service.ts
++++ b/libs/components/src/dialog/dialog.service.ts
+@@ -187,7 +187,7 @@ export class DialogService {
+     if (!(await this.drawerService.closeAll())) {
+       return undefined;
+     }
+-    return this.stackDrawer(component, config, config?.closeOnNavigation ?? false);
++    return this.stackDrawer(component, config, config?.closeOnNavigation === true);
+   }
+ 
+   /**
+diff --git a/libs/components/src/form-field/password-input-toggle.directive.ts b/libs/components/src/form-field/password-input-toggle.directive.ts
+index ba55392..4dc3cc2 100644
+--- a/libs/components/src/form-field/password-input-toggle.directive.ts
++++ b/libs/components/src/form-field/password-input-toggle.directive.ts
+@@ -1,13 +1,11 @@
+ import {
+   AfterContentInit,
+   Directive,
+-  EventEmitter,
+   Host,
+   HostBinding,
+   HostListener,
+   model,
+   OnChanges,
+-  Output,
+ } from "@angular/core";
+ 
+ import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+@@ -27,9 +25,6 @@ export class BitPasswordInputToggleDirective implements AfterContentInit, OnChan
+    * Whether the input is toggled to show the password.
+    */
+   readonly toggled = model(false);
+-  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+-  // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
+-  @Output() toggledChange = new EventEmitter<boolean>();
+ 
+   @HostBinding("attr.title") title = this.i18nService.t("toggleVisibility");
+   @HostBinding("attr.aria-label") label = this.i18nService.t("toggleVisibility");
+@@ -39,7 +34,6 @@ export class BitPasswordInputToggleDirective implements AfterContentInit, OnChan
+    */
+   @HostListener("click") onClick() {
+     this.toggled.update((toggled) => !toggled);
+-    this.toggledChange.emit(this.toggled());
+ 
+     this.update();
+   }
+diff --git a/libs/components/src/stepper/step.component.ts b/libs/components/src/stepper/step.component.ts
+index 2f0910e..7ffb97f 100644
+--- a/libs/components/src/stepper/step.component.ts
++++ b/libs/components/src/stepper/step.component.ts
+@@ -1,4 +1,4 @@
+-import { CdkStep, CdkStepper } from "@angular/cdk/stepper";
++import { CdkStep } from "@angular/cdk/stepper";
+ import { Component, input } from "@angular/core";
+ 
+ // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
+@@ -10,8 +10,4 @@ import { Component, input } from "@angular/core";
+ })
+ export class StepComponent extends CdkStep {
+   readonly subLabel = input();
+-
+-  constructor(stepper: CdkStepper) {
+-    super(stepper);
+-  }
+ }
+diff --git a/libs/components/src/stepper/stepper.component.ts b/libs/components/src/stepper/stepper.component.ts
+index 022ce2e..e89c8bf 100644
+--- a/libs/components/src/stepper/stepper.component.ts
++++ b/libs/components/src/stepper/stepper.component.ts
+@@ -1,7 +1,6 @@
+-import { Directionality } from "@angular/cdk/bidi";
+ import { CdkStepper, StepperOrientation } from "@angular/cdk/stepper";
+ import { CommonModule } from "@angular/common";
+-import { ChangeDetectorRef, Component, ElementRef, Input, QueryList } from "@angular/core";
++import { Component, Input, QueryList } from "@angular/core";
+ 
+ import { ResizeObserverDirective } from "../resize-observer";
+ import { TypographyModule } from "../typography";
+@@ -21,16 +20,6 @@ import { StepComponent } from "./step.component";
+   imports: [CommonModule, ResizeObserverDirective, TypographyModule],
+ })
+ export class StepperComponent extends CdkStepper {
+-  // Need to reimplement the constructor to fix an invalidFactoryDep error in Storybook
+-  // @see https://github.com/storybookjs/storybook/issues/23534#issuecomment-2042888436
+-  constructor(
+-    _dir: Directionality,
+-    _changeDetectorRef: ChangeDetectorRef,
+-    _elementRef: ElementRef<HTMLElement>,
+-  ) {
+-    super(_dir, _changeDetectorRef, _elementRef);
+-  }
+-
+   private resizeWidthsMap = new Map([
+     [2, 600],
+     [3, 768],
+diff --git a/libs/importer/src/components/import.component.ts b/libs/importer/src/components/import.component.ts
+index 1099426..7ed3062 100644
+--- a/libs/importer/src/components/import.component.ts
++++ b/libs/importer/src/components/import.component.ts
+@@ -19,7 +19,7 @@ import {
+ import { takeUntilDestroyed, toSignal } from "@angular/core/rxjs-interop";
+ import { FormBuilder, ReactiveFormsModule, ValidatorFn, Validators } from "@angular/forms";
+ import { Router } from "@angular/router";
+-import * as JSZip from "jszip";
++import JSZip from "jszip";
+ import {
+   Observable,
+   Subject,
+diff --git a/libs/importer/src/services/read-import-file-contents.ts b/libs/importer/src/services/read-import-file-contents.ts
+index 182cd3f..7ca87b8 100644
+--- a/libs/importer/src/services/read-import-file-contents.ts
++++ b/libs/importer/src/services/read-import-file-contents.ts
+@@ -1,4 +1,4 @@
+-import * as JSZip from "jszip";
++import JSZip from "jszip";
+ 
+ import { ImportType } from "../models/import-options";
+ 
+diff --git a/libs/tools/export-vault-core/src/services/individual-vault-export.service.ts b/libs/tools/export-vault-core/src/services/individual-vault-export.service.ts
+index 79e7c94..4a61b6b 100644
+--- a/libs/tools/export-vault-core/src/services/individual-vault-export.service.ts
++++ b/libs/tools/export-vault-core/src/services/individual-vault-export.service.ts
+@@ -1,6 +1,6 @@
+ // FIXME: Update this file to be type safe and remove this and next line
+ // @ts-strict-ignore
+-import * as JSZip from "jszip";
++import JSZip from "jszip";
+ import * as papa from "papaparse";
+ import { firstValueFrom } from "rxjs";
+ 
+diff --git a/tsconfig.base.json b/tsconfig.base.json
+index 9b7efdb..4d68787 100644
+--- a/tsconfig.base.json
++++ b/tsconfig.base.json
+@@ -13,7 +13,6 @@
+     "emitDecoratorMetadata": true,
+     "declaration": false,
+     "outDir": "dist",
+-    "baseUrl": ".",
+     "resolveJsonModule": true,
+     "allowJs": true,
+     "sourceMap": true,

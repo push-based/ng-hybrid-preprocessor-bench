@@ -1,0 +1,16 @@
+{
+  "name": "bitwarden",
+  "repo": "https://github.com/bitwarden/clients.git",
+  "sha": "8139eb01f5ad3ebd95d924692fd51821a5fe74dd",
+  "notes": "Bitwarden's web vault, the open-source build (apps/web), the app the Angular team reportedly tested ngp on most. Nx monorepo with npm workspaces; the vault imports about 70 path aliases into libs/. Built with webpack and @ngtools/webpack, not the Angular CLI: its angular.json only serves Storybook, so the ng build reference (R) skips it.",
+  "tsconfigApp": "apps/web/tsconfig.build.json",
+  "ngpTarget": "apps/web/tsconfig.build.json",
+  "cliBuild": false,
+  "patch": "bitwarden.patch",
+  "patchNotes": "The app is on Angular 21 and TypeScript 5.9; the patch is the migration to Angular 22 and TypeScript 6 and nothing else. Angular 22: CdkStep and CdkStepper constructors take no arguments; DialogConfig.closeOnNavigation also accepts strings; NG1054 rejects an @Output named like a model()'s own change output (toggledChange), so the duplicate is dropped. TypeScript 6: baseUrl is deprecated (TS5101) and every path alias is already relative to the tsconfig, so it goes; esModuleInterop is on by default, so `import * as JSZip` becomes a default import; types default to [], so apps/web/tsconfig.build.json stops pulling in the connectors' Jest specs.",
+  "install": [
+    "npm install --legacy-peer-deps --min-release-age=0 --no-audit --no-fund --ignore-scripts"
+  ],
+  "angularVersion": "22.3.0-next.2",
+  "installNotes": "--ignore-scripts skips Electron's binary download, the desktop app's Rust build and husky, none of which the web vault's compile needs. The root package.json has no install scripts of its own."
+}
